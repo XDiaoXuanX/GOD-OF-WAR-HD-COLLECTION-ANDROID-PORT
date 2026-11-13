@@ -1,0 +1,24 @@
+# compilação
+build/
+dist/
+.gradle/
+android/app/build/
+android/build/
+android/local.properties
+android/app/src/main/jniLibs/
+*.apk
+*.so
+*.orig
+*.log
+
+# capturas e rascunhos da pasta (podem mostrar o jogo)
+/*.png
+/*.jpg
+
+# arquivos do jogo (nunca vão para o repositório)
+*.pkg
+*.psarc
+*.vpk
+*.rif
+work.bin
+games/**/*.bin

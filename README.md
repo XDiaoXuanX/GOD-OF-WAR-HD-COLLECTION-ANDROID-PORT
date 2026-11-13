@@ -1,0 +1,177 @@
+<div align="center">
+
+<img src="docs/icone.png" width="160" alt="God of War Collection - Android">
+
+# God of War Collection · Android
+
+**PS Vita → Android arm64 · recompilação estática / static recompilation · Vulkan**
+
+![Android](https://img.shields.io/badge/Android-9%2B%20(API%2028)-3DDC84?logo=android&logoColor=white)
+![ABI](https://img.shields.io/badge/ABI-arm64--v8a-0A84FF)
+![Vulkan](https://img.shields.io/badge/Vulkan-1.1-AC162C?logo=vulkan&logoColor=white)
+![Status](https://img.shields.io/badge/status-demonstração%20%2F%20demo-orange)
+![Suporte](https://img.shields.io/badge/suporte%20%2F%20support-nenhum%20%2F%20none-lightgrey)
+
+[🇧🇷 Português](#-português) · [🇺🇸 English](#-english)
+
+</div>
+
+> [!WARNING]
+> **🇧🇷 PROJETO DE DEMONSTRAÇÃO. NÃO HÁ SUPORTE.** Este repositório mostra uma técnica (recompilação estática de um jogo do PS Vita para Android). Ele é publicado como está: não há suporte, garantia, prazo nem atendimento de issues ou pedidos. Pode não funcionar no seu aparelho.
+>
+> **🇺🇸 DEMONSTRATION PROJECT. NO SUPPORT WILL BE PROVIDED.** This repository showcases a technique (static recompilation of a PS Vita game to Android). It is published as is: no support, no warranty, no schedule, and no handling of issues or requests. It may not work on your device.
+
+> [!CAUTION]
+> **🇧🇷** O único lugar oficial é este repositório. APKs de outros sites, do APKVISION ou de canais do YouTube com links encurtados podem conter vírus.
+>
+> **🇺🇸** This repository is the only official source. APKs from other sites, APKVISION or YouTube channels with shortened links may contain malware.
+
+---
+
+## 🇧🇷 Português
+
+### O que é
+
+O God of War Collection do PS Vita (God of War e God of War II) rodando **nativo** no Android: o código ARM do jogo foi recompilado para C e roda sobre o runtime **vitart**, com a GPU do Vita (GXM) traduzida para **Vulkan**. Não há emulação. É o mesmo projeto do porte de PC, levado para celulares arm64.
+
+**Nada do jogo está neste repositório nem no APK.** Você precisa do seu próprio jogo:
+
+| Arquivo | O que é |
+|---|---|
+| `gowHD_PSV.pkg` | o PKG **americano** (PCSA00126, 3,3 GB) |
+| `work.bin` | a licença (512 bytes) da sua conta |
+
+### Recursos
+
+| | |
+|---|---|
+| 🎮 **Lançador** | visual do PS Vita com ondas, animação de abertura em 3D, troféus, idiomas e opções |
+| 📦 **Instalação** | o lançador acha o PKG e o `work.bin`, confere os dois e tira o jogo do PKG no próprio celular; os dados do porte vêm cifrados das releases e só abrem com a sua licença |
+| 🔄 **Atualização automática** | baixa a versão nova das releases com barra de progresso e instala sozinha (Android 12 ou mais novo) |
+| 🕹️ **Controles na tela** | três visuais: Clássico, Cristal (estilo DualSense) e Minimalista; dá para arrastar, mudar tamanho e opacidade; controles físicos funcionam |
+| 🏆 **Troféus** | notificação durante o jogo e grade completa no lançador |
+| 🌐 **Idiomas** | segue o idioma do Android (português, inglês, espanhol, francês, alemão e italiano) |
+| ⚡ **GPUs** | Adreno, Mali, Xclipse e PowerVR; Turnip embutido para Adreno; limites de textura próprios para Mali |
+
+### Como instalar
+
+1. Baixe o APK em **[Releases](../../releases)** e instale.
+2. Abra o app e permita o acesso aos arquivos.
+3. Copie o `gowHD_PSV.pkg` e o `work.bin` para `Download` ou `Documents`. Se o lançador não achar, toque na linha e escolha o arquivo.
+4. Toque em **Instalar o jogo**. As texturas HD são opcionais (+1,7 GB).
+
+Já tem a pasta do porte copiada do PC? Use **"Já tenho a pasta copiada do PC"** no painel de instalação.
+
+### Como compilar
+
+Precisa do Android NDK (clang, API 29), do JDK 17 e do Git Bash ou de um shell POSIX.
+
+```bash
+scripts/build-android-runtime.sh   # libvitart.so
+scripts/build-android-vkshim.sh    # libvulkan.so (camada sobre o driver do sistema)
+scripts/build-android-pfs.sh       # libpfs_extrair.so (tira o jogo do PKG no celular)
+scripts/build-android-modules.sh   # módulos do jogo (gerados a partir do SEU jogo, fora deste repositório)
+cd android && ./gradlew assembleRelease
+```
+
+Os módulos do jogo saem do seu próprio PKG pelo recompilador do porte de PC; eles não são distribuídos aqui.
+
+### Estrutura
+
+```
+android/          app (lançador, jogo, controles, instalador, atualização)
+runtime/vitart/   runtime: HLE do Vita, GXM → Vulkan, áudio, troféus
+runtime/vkshim/   camada Vulkan
+runtime/arm/      suporte ao código ARM recompilado
+games/gow/        perfil e opções do God of War
+third_party/      bibliotecas usadas (cada uma com a sua licença)
+tools/            traduções, extrator do PKG, arte gerada por código
+scripts/          compilação para Android
+```
+
+### Apoie o projeto
+
+[![LivePix](https://img.shields.io/badge/LivePix-apoiar-00C853)](https://livepix.gg/luisxl15)
+[![PayPal](https://img.shields.io/badge/PayPal-doar-00457C?logo=paypal&logoColor=white)](https://www.paypal.com/donate/?business=7MWMRNN92Z464)
+
+Doações não compram suporte: o projeto continua sendo de demonstração.
+
+---
+
+## 🇺🇸 English
+
+### What it is
+
+PS Vita's God of War Collection (God of War and God of War II) running **natively** on Android: the game's ARM code was recompiled to C and runs on the **vitart** runtime, with the Vita GPU (GXM) translated to **Vulkan**. There is no emulation. It is the same project as the PC port, brought to arm64 phones.
+
+**Nothing from the game is in this repository or in the APK.** You need your own copy:
+
+| File | What it is |
+|---|---|
+| `gowHD_PSV.pkg` | the **US** PKG (PCSA00126, 3.3 GB) |
+| `work.bin` | your account's license (512 bytes) |
+
+### Features
+
+| | |
+|---|---|
+| 🎮 **Launcher** | PS Vita look with waves, 3D boot animation, trophies, languages and options |
+| 📦 **Install** | the launcher finds the PKG and `work.bin`, checks both and extracts the game from the PKG on the phone; the port's data comes encrypted from the releases and only opens with your license |
+| 🔄 **Auto update** | downloads the new version from the releases with a progress bar and installs it by itself (Android 12 or newer) |
+| 🕹️ **Touch controls** | three styles: Classic, Crystal (DualSense-like) and Minimal; drag, resize and change opacity; physical controllers work |
+| 🏆 **Trophies** | in-game notification and a full grid in the launcher |
+| 🌐 **Languages** | follows the Android language (Portuguese, English, Spanish, French, German and Italian) |
+| ⚡ **GPUs** | Adreno, Mali, Xclipse and PowerVR; bundled Turnip for Adreno; Mali-specific texture limits |
+
+### How to install
+
+1. Download the APK from **[Releases](../../releases)** and install it.
+2. Open the app and allow file access.
+3. Copy `gowHD_PSV.pkg` and `work.bin` to `Download` or `Documents`. If the launcher does not find them, tap the row and pick the file.
+4. Tap **Install the game**. HD textures are optional (+1.7 GB).
+
+Already have the port folder copied from the PC? Use **"I already have the folder copied from the PC"** in the install panel.
+
+### How to build
+
+Requires the Android NDK (clang, API 29), JDK 17 and Git Bash or a POSIX shell.
+
+```bash
+scripts/build-android-runtime.sh   # libvitart.so
+scripts/build-android-vkshim.sh    # libvulkan.so (layer over the system driver)
+scripts/build-android-pfs.sh       # libpfs_extrair.so (extracts the game from the PKG on the phone)
+scripts/build-android-modules.sh   # game modules (generated from YOUR game, outside this repository)
+cd android && ./gradlew assembleRelease
+```
+
+The game modules come from your own PKG through the PC port's recompiler; they are not distributed here.
+
+### Layout
+
+```
+android/          app (launcher, game, controls, installer, updater)
+runtime/vitart/   runtime: Vita HLE, GXM → Vulkan, audio, trophies
+runtime/vkshim/   Vulkan layer
+runtime/arm/      support for the recompiled ARM code
+games/gow/        God of War profile and options
+third_party/      libraries used (each with its own license)
+tools/            translations, PKG extractor, code-generated art
+scripts/          Android build
+```
+
+### Support the project
+
+[![LivePix](https://img.shields.io/badge/LivePix-support-00C853)](https://livepix.gg/luisxl15)
+[![PayPal](https://img.shields.io/badge/PayPal-donate-00457C?logo=paypal&logoColor=white)](https://www.paypal.com/donate/?business=7MWMRNN92Z464)
+
+Donations do not buy support: this remains a demonstration project.
+
+---
+
+<div align="center">
+
+Port feito e mantido por / made and maintained by **Luis Santos "DESANTA"** · [github.com/luisxl15](https://github.com/luisxl15)
+
+<sub>God of War é marca da Sony Interactive Entertainment. Este projeto não tem ligação com a Sony. · God of War is a trademark of Sony Interactive Entertainment. This project is not affiliated with Sony.</sub>
+
+</div>

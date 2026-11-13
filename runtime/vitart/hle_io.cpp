@@ -1,0 +1,1059 @@
+// HLE de arquivos (sceIo*) e de sceClib* para o vitart.
+// Dispositivos do Vita -> pastas do PC: app0: = diretório do app; ux0:, savedata0:, addcont0: e
+// afins ficam sob o diretório de dados (--data).
+#include "vitart.h"
+#include "video_hd.h"
+#include <thread>
+
+#include <algorithm>
+#include <cctype>
+#include <fstream>
+#include <iterator>
+#include <chrono>
+#include <cstdarg>
+#include <cstdio>
+#include <filesystem>
+#include <memory>
+#include <vector>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+
+#include <fcntl.h>
+#ifdef _WIN32
+#include <io.h>
+#endif
+#include <sys/stat.h>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
+
+namespace fs = std::filesystem;
+
+// stb_image (hle_gxm.cpp): o zlib dos blocos do psarc (registros de mods sobre a versão base de um WAD)
+extern "C" char *stbi_zlib_decode_malloc_guesssize_headerflag(const char *buffer, int len, int initial_size, int *outlen, int parse_header);
+
+namespace vt {
+
+constexpr uint32_t SCE_ERROR_ERRNO_ENOENT = 0x80010002u;
+constexpr uint32_t SCE_ERROR_ERRNO_EBADF = 0x80010009u;
+constexpr uint32_t SCE_ERROR_ERRNO_EEXIST = 0x80010011u;
+
+static std::string host_path(const std::string &p) {
+    const size_t colon = p.find(':');
+    std::string dev = colon == std::string::npos ? "" : p.substr(0, colon);
+    std::string rest = colon == std::string::npos ? p : p.substr(colon + 1);
+    while (!rest.empty() && (rest[0] == '/' || rest[0] == '\\'))
+        rest.erase(0, 1);
+    if (dev == "app0")
+        return app_path() + "/" + rest;
+    if (dev.empty())
+        return app_path() + "/" + rest;
+    return data_path() + "/" + dev + "/" + rest;
+}
+
+std::string vita_host_path(const std::string &p) { return host_path(p); }
+
+// VITART_SKIP_VIDEOS=1: os vídeos Bink (.bk2) aparecem como inexistentes, e o jogo segue sem tocá-los.
+static bool skipped_video(const std::string &path) {
+    static const bool skip = getenv("VITART_SKIP_VIDEOS") && *getenv("VITART_SKIP_VIDEOS") == '1';
+    if (!skip || path.size() < 4) return false;
+    std::string ext = path.substr(path.size() - 4);
+    for (char &c : ext) c = (char)std::tolower((unsigned char)c);
+    return ext == ".bk2";
+}
+
+// Trocas dentro de um .psarc (mods do vitart, p. ex. o menu de pausa com as opções do PC): o arquivo
+// <dados>/mods/<nome>.psarc.vtpatch traz a TOC inteira já remendada (mesmo tamanho da original) e os
+// arquivos novos, que ficam "depois do fim" do psarc. O jogo (FIOS2) lê o psarc como sempre; o vitart
+// junta as três fontes na leitura. O psarc original não é tocado. Formato: "VTPP", u64 tamanho do psarc
+// original, u32 tamanho da TOC, u32 tamanho dos dados extras, TOC, extras (gerado por tools/psarc_patch.py).
+// Um arquivo de um mod instalado: fica sempre nos extras (ligado ou não) para o mod poder ser ligado com o jogo
+// rodando; ligar/desligar só muda a entrada da TOC (mods_hot_apply).
+struct ModFile {
+    std::string mod;
+    uint32_t idx = 0;       // entrada da TOC
+    uint64_t first = 0;     // primeiro bloco reservado na tabela
+    uint64_t size = 0, off = 0;
+};
+struct PsarcPatch {
+    uint64_t orig = 0;
+    std::vector<uint8_t> toc, extra;
+    std::vector<uint8_t> tmpl;          // TOC sem os mods de arquivo inteiro (patch base + registros + reserva)
+    std::vector<ModFile> files;         // arquivos de todos os mods instalados, na ordem de modlist.tsv
+    std::vector<std::string> names;     // manifesto (nomes das entradas 1..n)
+    uint32_t guest_buf = 0, guest_off = 0, guest_len = 0; // onde o jogo (FIOS) guardou a TOC lida
+};
+// Carregador de mods (docs/modding/README.md). Por cima do patch do vitart:
+//  - mods de arquivo inteiro (<mods>/<id>/entries.tsv: "<psarc>\t<entrada da TOC>\t<arquivo no mod>"): os arquivos de
+//    todos os mods instalados ficam nos extras desde o começo, e ligar/desligar só troca a entrada da TOC -- inclusive
+//    com o jogo rodando (mods_hot_apply: a TOC que o FIOS guardou na memória do jogo é reescrita);
+//  - mods de registro (<mods>/<id>/records.tsv: "<psarc>\t<entrada>\t<tag>\t<nome>\t<ocorrência>\t<arquivo|=valor>"):
+//    trocam registros de um WAD (textos, por exemplo) e se combinam com o patch do vitart e com outros mods no mesmo
+//    WAD; entram ao abrir o jogo (os WADs que eles mudam, r_perma e r_shella, só são lidos no boot).
+// Ligado = mod_<id>=1 no vitart_options.ini; a ordem (o último ganha) é a de mods/modlist.tsv.
+// Tradução escolhida (language=<código> no vitart_options.ini; vazio = o texto original). Fica fora dos mods para
+// nunca haver duas ligadas: <data>/traducoes/<código>/records.tsv, no formato dos mods de registro, com os textos dos
+// dois jogos (tools/vitart_modkit.py build_translation, no PC). No celular, sem language= no ini, vale o idioma do
+// lançador (VITART_LANG, o código do Vita): 17 pt-BR, 3 es, 2 fr, 4 de, 5 it.
+std::string ini_language() {
+    std::string code;
+    bool achou = false;
+    if (FILE *f = fopen((data_path() + "/vitart_options.ini").c_str(), "r")) {
+        char line[512], v[64];
+        while (fgets(line, sizeof line, f)) {
+            if (sscanf(line, "language=%63[A-Za-z_-]", v) == 1) code = v, achou = true;
+            else if (!strncmp(line, "language=", 9)) code.clear(), achou = true; // language= vazio: o original
+        }
+        fclose(f);
+    }
+    if (!achou)
+        if (const char *e = getenv("VITART_LANG"); e && *e)
+            switch (std::atoi(e)) {
+                case 17: code = "pt-BR"; break;
+                case 3: code = "es"; break;
+                case 2: code = "fr"; break;
+                case 4: code = "de"; break;
+                case 5: code = "it"; break;
+                default: break;
+            }
+    return code;
+}
+std::string mods_dir_for(const std::string &) {
+    const char *md = getenv("VITART_MODS_DIR"); // testes: outra pasta de patches, sem mexer nos instalados
+    return md && *md ? std::string(md) : data_path() + "/mods";
+}
+static std::vector<std::string> ini_mods_on() {
+    std::vector<std::string> on;
+    if (FILE *f = fopen((data_path() + "/vitart_options.ini").c_str(), "r")) {
+        char line[512];
+        while (fgets(line, sizeof line, f)) {
+            char id[128];
+            unsigned v = 0;
+            if (sscanf(line, "mod_%127[A-Za-z0-9_]=%u", id, &v) == 2 && v) on.push_back(id);
+        }
+        fclose(f);
+    }
+    return on;
+}
+// Mods instalados, na ordem de modlist.tsv ("<jogo>\t<índice no menu>\t<id>\t<nome>").
+static std::vector<std::string> modlist_ids() {
+    std::vector<std::string> out;
+    if (FILE *f = fopen((mods_dir_for("") + "/modlist.tsv").c_str(), "r")) {
+        char line[1024];
+        while (fgets(line, sizeof line, f)) {
+            char game[16], id[128];
+            unsigned idx = 0;
+            if (sscanf(line, "%15s %u %127s", game, &idx, id) == 3) out.push_back(id);
+        }
+        fclose(f);
+    }
+    return out;
+}
+std::vector<std::string> enabled_mods() {
+    const auto on = ini_mods_on();
+    std::vector<std::string> out;
+    for (const std::string &id : modlist_ids())
+        if (std::find(on.begin(), on.end(), id) != on.end()) out.push_back(id);
+    return out;
+}
+static uint64_t be(const uint8_t *p, int n) {
+    uint64_t v = 0;
+    for (int i = 0; i < n; i++) v = v << 8 | p[i];
+    return v;
+}
+static void put_be(uint8_t *p, int n, uint64_t v) {
+    for (int i = n - 1; i >= 0; i--, v >>= 8) p[i] = (uint8_t)v;
+}
+struct TocShape {
+    uint32_t ent, n, block;
+    int w;
+    size_t tab_at;
+};
+static TocShape shape(const std::vector<uint8_t> &toc) {
+    TocShape s;
+    s.ent = (uint32_t)be(&toc[16], 4), s.n = (uint32_t)be(&toc[20], 4), s.block = (uint32_t)be(&toc[24], 4);
+    s.w = s.block <= 0x10000 ? 2 : s.block <= 0x1000000 ? 3 : 4;
+    s.tab_at = 32 + (size_t)s.n * s.ent;
+    return s;
+}
+// Reserva os blocos de data na tabela (0 = bloco cheio cru) e põe os dados no fim dos extras; devolve o arquivo.
+static ModFile reserve_file(std::vector<uint8_t> &toc, std::vector<uint8_t> &extra, uint64_t orig, uint32_t idx,
+                            const std::vector<uint8_t> &data) {
+    const TocShape s = shape(toc);
+    const uint64_t nb = (data.size() + s.block - 1) / s.block;
+    ModFile mf;
+    mf.idx = idx, mf.size = data.size(), mf.off = orig + extra.size();
+    mf.first = (toc.size() - s.tab_at) / s.w;
+    toc.resize(toc.size() + nb * s.w, 0);
+    extra.insert(extra.end(), data.begin(), data.end());
+    extra.resize(extra.size() + (nb * s.block - data.size()), 0);
+    return mf;
+}
+static void point_entry(std::vector<uint8_t> &toc, const ModFile &mf) {
+    const TocShape s = shape(toc);
+    uint8_t *e = &toc[32 + (size_t)mf.idx * s.ent];
+    put_be(e + 16, 4, mf.first);
+    put_be(e + 20, 5, mf.size);
+    put_be(e + 25, 5, mf.off);
+}
+// A TOC cresceu: o que o psarc tinha logo depois dela (o manifesto, entrada 0, e o que mais estiver no trecho
+// coberto) ficaria escondido pela TOC nova; esses dados são copiados crus para os extras.
+static void relocate_shadowed(std::vector<uint8_t> &toc, std::vector<uint8_t> &extra, uint64_t orig, FILE *ps,
+                              uint64_t orig_toc_len) {
+    const TocShape s = shape(toc);
+    for (uint32_t i = 0; i < s.n; i++) {
+        uint8_t *e = &toc[32 + (size_t)i * s.ent];
+        const uint64_t bi = be(e + 16, 4), size = be(e + 20, 5), off = be(e + 25, 5);
+        if (off >= orig || off >= toc.size() || !size) continue;
+        uint64_t raw = 0;
+        for (uint64_t k = 0; k * s.block < size; k++) {
+            const size_t at = s.tab_at + (size_t)(bi + k) * s.w;
+            const uint64_t z = at + s.w <= toc.size() ? be(&toc[at], s.w) : 0;
+            raw += z ? z : s.block;
+        }
+        if (off + raw <= orig_toc_len) continue;
+        std::vector<uint8_t> buf(raw);
+        _fseeki64(ps, (int64_t)off, SEEK_SET);
+        if (fread(buf.data(), 1, raw, ps) != raw) continue;
+        put_be(e + 25, 5, orig + extra.size());
+        extra.insert(extra.end(), buf.begin(), buf.end());
+    }
+}
+// Conteúdo da entrada idx pela TOC dada (blocos zlib ou crus, no psarc ou nos extras).
+static std::vector<uint8_t> read_entry(const std::vector<uint8_t> &toc, const std::vector<uint8_t> &extra, uint64_t orig,
+                                       FILE *ps, uint32_t idx) {
+    const TocShape s = shape(toc);
+    std::vector<uint8_t> out;
+    if (idx >= s.n) return out;
+    const uint8_t *e = &toc[32 + (size_t)idx * s.ent];
+    uint64_t bi = be(e + 16, 4), size = be(e + 20, 5), off = be(e + 25, 5);
+    std::vector<uint8_t> raw;
+    while (out.size() < size) {
+        const size_t at = s.tab_at + (size_t)bi * s.w;
+        const uint64_t z = at + s.w <= toc.size() ? be(&toc[at], s.w) : 0;
+        const uint64_t want = std::min<uint64_t>(s.block, size - out.size()), take = z ? z : s.block;
+        raw.resize(take);
+        if (off >= orig) {
+            const uint64_t o = off - orig;
+            if (o + take > extra.size()) break;
+            memcpy(raw.data(), extra.data() + o, take);
+        } else {
+            _fseeki64(ps, (int64_t)off, SEEK_SET);
+            if (fread(raw.data(), 1, take, ps) != take) break;
+        }
+        if (z && z != want && raw[0] == 0x78) {
+            int got = 0;
+            char *d = stbi_zlib_decode_malloc_guesssize_headerflag((const char *)raw.data(), (int)z, (int)want, &got, 1);
+            if (!d) break;
+            out.insert(out.end(), (uint8_t *)d, (uint8_t *)d + std::min<int>(got, (int)want));
+            free(d);
+        } else {
+            out.insert(out.end(), raw.begin(), raw.begin() + want);
+        }
+        off += take, bi++;
+    }
+    return out;
+}
+// registros do WAD; quais têm corpo é o jogo que sabe (game_wad_has_body)
+struct WadRec {
+    uint16_t tag, flags;
+    uint32_t size;
+    char name[24];
+    std::vector<uint8_t> body;
+    bool has_body;
+};
+static std::vector<WadRec> wad_parse(const std::vector<uint8_t> &d, const std::string &psarc) {
+    std::vector<WadRec> out;
+    size_t o = 0;
+    while (o + 32 <= d.size()) {
+        WadRec r;
+        memcpy(&r.tag, &d[o], 2), memcpy(&r.flags, &d[o + 2], 2), memcpy(&r.size, &d[o + 4], 4), memcpy(r.name, &d[o + 8], 24);
+        r.has_body = game_wad_has_body(r.tag, psarc);
+        const size_t len = r.has_body ? std::min<size_t>(r.size, d.size() - o - 32) : 0;
+        r.body.assign(d.begin() + o + 32, d.begin() + o + 32 + len);
+        out.push_back(std::move(r));
+        o = (o + 32 + len + 15) & ~(size_t)15;
+    }
+    return out;
+}
+static std::vector<uint8_t> wad_write(const std::vector<WadRec> &recs) {
+    std::vector<uint8_t> w;
+    for (const WadRec &r : recs) {
+        const uint32_t size = r.has_body ? (uint32_t)r.body.size() : r.size;
+        const size_t at = w.size();
+        w.resize(at + 32);
+        memcpy(&w[at], &r.tag, 2), memcpy(&w[at + 2], &r.flags, 2), memcpy(&w[at + 4], &size, 4), memcpy(&w[at + 8], r.name, 24);
+        if (r.has_body) {
+            w.insert(w.end(), r.body.begin(), r.body.end());
+            w.resize((w.size() + 15) & ~(size_t)15, 0);
+        }
+    }
+    return w;
+}
+static std::vector<uint8_t> read_file_bytes(const std::string &p) {
+    std::ifstream in(fs::u8path(p), std::ios::binary);
+    return std::vector<uint8_t>((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+static std::shared_ptr<PsarcPatch> psarc_patch(const std::string &hp);
+static std::mutex g_patch_mutex;
+static std::unordered_map<std::string, std::shared_ptr<PsarcPatch>> g_patch_cache; // carregado uma vez por psarc
+static std::vector<uint8_t> build_toc(const PsarcPatch &pt, const std::vector<std::string> &on) {
+    std::vector<uint8_t> toc = pt.tmpl;
+    for (const ModFile &mf : pt.files)
+        if (mf.mod == "*" || std::find(on.begin(), on.end(), mf.mod) != on.end()) point_entry(toc, mf);
+    return toc;
+}
+static std::shared_ptr<PsarcPatch> psarc_patch(const std::string &hp) {
+    if (hp.size() < 6 || _stricmp(hp.c_str() + hp.size() - 6, ".psarc") != 0) return nullptr;
+    static const bool off = getenv("VITART_NO_MODS") != nullptr;
+    if (off) return nullptr;
+    const std::lock_guard<std::mutex> lock(g_patch_mutex);
+    // "exec//x.psarc" e "exec/x.psarc" são o mesmo arquivo: uma entrada só (o "Apply" mexe nela uma vez)
+    const std::string key = fs::path(hp).lexically_normal().generic_string();
+    if (auto it = g_patch_cache.find(key); it != g_patch_cache.end()) return it->second;
+    auto &slot = g_patch_cache[key];
+    const std::string name = fs::path(hp).filename().string();
+    const std::string dir = mods_dir_for(name);
+    const std::string pp = dir + "/" + name + ".vtpatch";
+    auto pt = std::make_shared<PsarcPatch>();
+    std::error_code ec;
+    bool have = false;
+    if (FILE *f = fopen(pp.c_str(), "rb")) {
+        char magic[4] = {};
+        uint32_t tl = 0, el = 0;
+        bool ok = fread(magic, 1, 4, f) == 4 && !memcmp(magic, "VTPP", 4) && fread(&pt->orig, 8, 1, f) == 1 &&
+                  fread(&tl, 4, 1, f) == 1 && fread(&el, 4, 1, f) == 1;
+        if (ok) {
+            pt->toc.resize(tl), pt->extra.resize(el);
+            ok = fread(pt->toc.data(), 1, tl, f) == tl && fread(pt->extra.data(), 1, el, f) == el;
+        }
+        fclose(f);
+        if (!ok || fs::file_size(hp, ec) != pt->orig) {
+            logf("vitart: %s ignorado (não corresponde a este %s)", pp.c_str(), name.c_str());
+            pt = std::make_shared<PsarcPatch>();
+        } else {
+            have = true;
+            logf("vitart: mods em %s: TOC remendada, %u bytes de arquivos trocados", name.c_str(), el);
+        }
+    }
+    FILE *ps = fopen(hp.c_str(), "rb");
+    if (!ps) return have ? slot = pt : nullptr;
+    uint8_t hdr[32] = {};
+    const bool hdr_ok = fread(hdr, 1, 32, ps) == 32 && !memcmp(hdr, "PSAR", 4);
+    const uint64_t orig_toc_len = hdr_ok ? be(hdr + 12, 4) : 0;
+    if (hdr_ok && !have) {
+        pt->orig = fs::file_size(hp, ec);
+        pt->toc.resize(orig_toc_len);
+        _fseeki64(ps, 0, SEEK_SET);
+        if (fread(pt->toc.data(), 1, orig_toc_len, ps) != orig_toc_len) pt->toc.clear();
+    }
+    if (!hdr_ok || pt->toc.empty()) {
+        fclose(ps);
+        return have ? slot = pt : nullptr;
+    }
+    {
+        const std::vector<uint8_t> man = read_entry(pt->toc, pt->extra, pt->orig, ps, 0);
+        std::string cur;
+        for (uint8_t c : man) {
+            if (c == '\n') pt->names.push_back(cur), cur.clear();
+            else cur += (char)c;
+        }
+        pt->names.push_back(cur);
+    }
+    const auto ids = modlist_ids();
+    const auto on = enabled_mods();
+    int nrec = 0, nfiles = 0;
+    // 1) arquivos inteiros de todos os mods instalados (reservados; a TOC aponta só os dos ligados)
+    for (const std::string &id : ids) {
+        FILE *t = fopen((dir + "/" + id + "/entries.tsv").c_str(), "r");
+        if (!t) continue;
+        char line[1024];
+        while (fgets(line, sizeof line, t)) {
+            char pn[256], rel[700];
+            unsigned idx = 0;
+            if (sscanf(line, "%255[^\t]\t%u\t%699[^\t\r\n]", pn, &idx, rel) != 3 || _stricmp(pn, name.c_str()) != 0) continue;
+            const std::vector<uint8_t> data = read_file_bytes(dir + "/" + id + "/" + rel);
+            if (data.empty() || idx == 0 || idx >= shape(pt->toc).n) {
+                logf("vitart: mod %s: %s não encontrado", id.c_str(), rel);
+                continue;
+            }
+            ModFile mf = reserve_file(pt->toc, pt->extra, pt->orig, idx, data);
+            mf.mod = id;
+            pt->files.push_back(mf);
+            nfiles++;
+        }
+        fclose(t);
+    }
+    // 2) registros (records.tsv) dos mods ligados, por cima da versão de cada WAD que vale ao abrir o jogo (a base ou
+    // a de um mod de arquivo inteiro ligado): o resultado fica sempre apontado (mod "*", depois dos outros), até
+    // reiniciar. Ex.: uma tradução (MSGS_TXT) junto com um mod que também troca o r_perma.
+    std::unordered_map<uint32_t, std::vector<WadRec>> wads;
+    std::vector<uint8_t> boot_toc = pt->toc;
+    for (const ModFile &mf : pt->files)
+        if (std::find(on.begin(), on.end(), mf.mod) != on.end()) point_entry(boot_toc, mf);
+    // a tradução primeiro: um mod que também troque o texto ganha dela
+    std::vector<std::pair<std::string, std::string>> fontes; // (pasta base, id)
+    if (const std::string lang = ini_language(); !lang.empty()) {
+        if (fs::exists(data_path() + "/traducoes/" + lang + "/records.tsv")) {
+            fontes.push_back({data_path() + "/traducoes", lang});
+            logf("vitart: tradução %s em %s", lang.c_str(), name.c_str());
+        } else {
+            logf("vitart: tradução %s não instalada (gere no Settings do PC e copie data/traducoes)", lang.c_str());
+        }
+    }
+    for (const std::string &id : on) fontes.push_back({dir, id});
+    for (const auto &[base, id] : fontes) {
+        FILE *t = fopen((base + "/" + id + "/records.tsv").c_str(), "r");
+        if (!t) continue;
+        char line[2048];
+        while (fgets(line, sizeof line, t)) {
+            char pn[256], rname[64], src[1024];
+            unsigned idx = 0, tag = 0, occ = 0;
+            if (sscanf(line, "%255[^\t]\t%u\t%u\t%63[^\t]\t%u\t%1023[^\t\r\n]", pn, &idx, &tag, rname, &occ, src) != 6 ||
+                _stricmp(pn, name.c_str()) != 0)
+                continue;
+            auto it = wads.find(idx);
+            if (it == wads.end()) it = wads.emplace(idx, wad_parse(read_entry(boot_toc, pt->extra, pt->orig, ps, idx), name)).first;
+            unsigned seen = 0;
+            bool done = false;
+            for (WadRec &r : it->second) {
+                if (r.tag != tag || strncmp(r.name, rname, 24) != 0 || seen++ != occ) continue;
+                if (src[0] == '=') r.size = (uint32_t)strtoul(src + 1, nullptr, 0); // parâmetro: o "tamanho" é o valor
+                else r.body = read_file_bytes(base + "/" + id + "/" + src);
+                done = true, nrec++;
+                break;
+            }
+            if (!done) logf("vitart: mod %s: registro %s (tag %u) não achado na entrada %u", id.c_str(), rname, tag, idx);
+        }
+        fclose(t);
+    }
+    for (auto &[idx, recs] : wads) {
+        ModFile mf = reserve_file(pt->toc, pt->extra, pt->orig, idx, wad_write(recs));
+        mf.mod = "*";
+        pt->files.push_back(mf);
+    }
+    // Entradas sem nome (MD5 que nenhum caminho dá) apontando para os blocos de cada arquivo reservado e para os do
+    // arquivo original que ele troca: o FIOS só prepara, ao montar, os blocos que alguma entrada usa; assim os dois
+    // lados ficam prontos e ligar/desligar depois (mods_hot_apply) só troca a entrada de verdade.
+    if (nfiles) {
+        const TocShape s0 = shape(pt->toc);
+        std::vector<uint8_t> ents;
+        auto slot = [&](const uint8_t *fields) {
+            const size_t at = ents.size();
+            ents.resize(at + s0.ent, 0);
+            snprintf((char *)&ents[at], 16, "vitart-slot%04zu", at / s0.ent);
+            memcpy(&ents[at + 16], fields, 14);
+        };
+        std::vector<uint32_t> seen;
+        for (const ModFile &mf : pt->files) {
+            uint8_t f[14];
+            put_be(f, 4, mf.first), put_be(f + 4, 5, mf.size), put_be(f + 9, 5, mf.off);
+            slot(f);
+            if (std::find(seen.begin(), seen.end(), mf.idx) != seen.end()) continue;
+            seen.push_back(mf.idx);
+            slot(&pt->toc[32 + (size_t)mf.idx * s0.ent + 16]);
+        }
+        pt->toc.insert(pt->toc.begin() + s0.tab_at, ents.begin(), ents.end());
+        put_be(&pt->toc[20], 4, s0.n + ents.size() / s0.ent);
+    }
+    if (nrec || nfiles) {
+        if (pt->toc.size() > orig_toc_len) relocate_shadowed(pt->toc, pt->extra, pt->orig, ps, orig_toc_len);
+        put_be(&pt->toc[12], 4, pt->toc.size());
+    }
+    fclose(ps);
+    pt->tmpl = pt->toc;
+    pt->toc = build_toc(*pt, on);
+    logf("vitart: mods em %s: %d registros, %zu arquivos instalados (%zu mods ligados)", name.c_str(), nrec, pt->files.size(),
+         on.size());
+    if (!have && !nrec && !nfiles) return nullptr;
+    return slot = pt;
+}
+// Liga/desliga os mods de arquivo inteiro com o jogo rodando: a TOC nova (mesmo tamanho) vai para o vitart e para a
+// cópia que o FIOS do jogo guardou. Devolve os nomes (do manifesto) dos arquivos que mudaram.
+std::vector<std::string> mods_hot_apply() {
+    std::vector<std::string> changed;
+    const auto on = enabled_mods();
+    const std::lock_guard<std::mutex> lock(g_patch_mutex);
+    for (auto &[hp, pt] : g_patch_cache) {
+        if (!pt || pt->tmpl.empty()) continue;
+        std::vector<uint8_t> toc = build_toc(*pt, on);
+        if (toc.size() != pt->toc.size()) continue;
+        const TocShape s = shape(toc);
+        for (uint32_t i = 1; i < s.n; i++)
+            if (memcmp(&toc[32 + (size_t)i * s.ent + 16], &pt->toc[32 + (size_t)i * s.ent + 16], 14) != 0 && i - 1 < pt->names.size())
+                changed.push_back(pt->names[i - 1]);
+        const std::vector<uint8_t> old = std::move(pt->toc);
+        pt->toc = toc;
+        // O FIOS ordena as entradas pelo MD5 do nome depois de ler (a 0, o manifesto, fica na frente; os campos
+        // continuam big-endian): cada entrada que mudou é achada pelo MD5 na cópia do jogo e só os 14 bytes de
+        // bloco/tamanho/offset são trocados. O resto (cabeçalho, tabela de blocos) é igual nas duas.
+        if (pt->guest_buf && pt->guest_off <= 32) {
+            uint8_t *g = ptr<uint8_t>(pt->guest_buf) + (32 - pt->guest_off);
+            const size_t room = pt->guest_len - (32 - pt->guest_off);
+            size_t wrote = 0;
+            for (uint32_t i = 1; i < s.n; i++) {
+                const uint8_t *e = &toc[32 + (size_t)i * s.ent];
+                if (memcmp(e + 16, &old[32 + (size_t)i * s.ent + 16], 14) == 0) continue;
+                for (uint32_t k = 1; k < s.n && (size_t)(k + 1) * s.ent <= room; k++)
+                    if (memcmp(g + (size_t)k * s.ent, e, 16) == 0) {
+                        memcpy(g + (size_t)k * s.ent + 16, e + 16, 14);
+                        wrote++;
+                        break;
+                    }
+            }
+            logf("vitart: mods: TOC do jogo (0x%08x): %zu de %zu entradas trocadas", pt->guest_buf, wrote, changed.size());
+        }
+    }
+    return changed;
+}
+
+struct File {
+    int fd = -1;
+    std::shared_ptr<PsarcPatch> patch; // psarc com trocas (ver acima)
+    int64_t pos = 0;                   // posição de leitura quando há trocas
+    std::string path;
+    bool is_dir = false;
+    bool video = false;      // .bk2 (cena em vídeo)
+    uint32_t skip_gen = 0;   // pedidos de pular já existentes quando foi aberto
+    fs::directory_iterator it, end;
+};
+// Pular a cena em vídeo (X): acha na memória do jogo o HBINK do vídeo que está tocando ({Width, Height,
+// Frames, FrameNum, LastFrameNum, ...}, o começo da estrutura do Bink SDK) e faz Frames = FrameNum + 1; o
+// laço do jogo vê o último quadro e fecha o vídeo do jeito normal. (Fim de arquivo congelava o Bink.)
+// O pedido fica pendente por alguns segundos e é tentado a cada leitura do controle: apertado logo no
+// começo, o arquivo já está aberto mas o HBINK ainda não existe. Só procura com o vídeo tocando (lido nos
+// últimos 0,5 s) e guarda onde achou, porque varrer a memória do jogo custa dezenas de ms.
+static std::atomic<uint32_t> g_skip_gen{0};
+// Cabeçalho do vídeo aberto (Bink 2: quadros em +8, largura em +20, altura em +24).
+static std::atomic<uint32_t> g_video_open{0}, g_video_w{0}, g_video_h{0}, g_video_frames{0}, g_video_gen{0};
+static std::atomic<int64_t> g_video_read_ms{0}, g_skip_until_ms{0};
+static uint32_t g_hbink = 0, g_hbink_gen = 0; // onde o HBINK do vídeo atual foi achado
+static int64_t now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+static bool hbink_matches(const uint32_t *v, uint32_t w, uint32_t h, uint32_t frames) {
+    return v[0] == w && v[1] == h && v[2] == frames && v[3] <= frames && v[4] <= frames;
+}
+static uint32_t hbink_find(uint32_t w, uint32_t h, uint32_t frames) {
+    uint8_t *base = mem_base();
+    for (uint8_t *p = base; p < base + 0x100000000ull;) {
+        MEMORY_BASIC_INFORMATION mi{};
+        if (!VirtualQuery(p, &mi, sizeof mi)) break;
+        uint8_t *end = (uint8_t *)mi.BaseAddress + mi.RegionSize;
+        if (mi.State == MEM_COMMIT && !(mi.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
+            for (uint8_t *q = (uint8_t *)(((uintptr_t)p + 3) & ~(uintptr_t)3); q + 20 <= end; q += 4) {
+                uint32_t v[5];
+                std::memcpy(v, q, 20);
+                if (hbink_matches(v, w, h, frames)) return (uint32_t)(q - base);
+            }
+        p = end;
+    }
+    return 0;
+}
+// Quadro atual do Bink do jogo (para a cena remasterizada, video_hd.cpp); -1 enquanto o HBINK não foi
+// achado. A busca na memória do jogo roda numa thread à parte, uma vez por vídeo.
+static std::atomic<bool> g_hbink_busy{false};
+static std::atomic<uint32_t> g_hbink_async{0}, g_hbink_async_gen{0};
+int64_t video_bink_frame() {
+    if (!g_video_open) return -1;
+    const uint32_t gen = g_video_gen, w = g_video_w, h = g_video_h, frames = g_video_frames;
+    uint32_t at = g_hbink_async_gen == gen ? g_hbink_async.load() : 0;
+    if (at) {
+        uint32_t v[5];
+        std::memcpy(v, ptr<uint8_t>(at), 20);
+        if (hbink_matches(v, w, h, frames)) return v[3];
+        g_hbink_async = 0;
+    }
+    if (now_ms() - g_video_read_ms > 500 || g_hbink_busy.exchange(true)) return -1;
+    std::thread([gen, w, h, frames] {
+        const auto t0 = std::chrono::steady_clock::now();
+        const uint32_t a = hbink_find(w, h, frames);
+        static int logged = 0;
+        if (logged++ < 40)
+            logf("vitart: busca do HBINK: %s em %.0f ms", a ? "achado" : "não achado",
+                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+        if (a) g_hbink_async = a, g_hbink_async_gen = gen;
+        std::this_thread::sleep_for(std::chrono::milliseconds(a ? 0 : 200));
+        g_hbink_busy = false;
+    }).detach();
+    return -1;
+}
+
+void video_skip_request() {
+    g_skip_gen++;
+    if (g_video_open) g_skip_until_ms = now_ms() + 4000;
+}
+// Chamada a cada leitura do controle.
+void video_skip_tick() {
+    const int64_t until = g_skip_until_ms, now = now_ms();
+    if (!until) return;
+    if (now > until || !g_video_open) {
+        g_skip_until_ms = 0;
+        return;
+    }
+    if (now - g_video_read_ms > 500) return; // vídeo aberto mas parado: espera ele tocar
+    static int64_t last_try = 0;
+    if (now - last_try < 150) return;
+    last_try = now;
+    const uint32_t w = g_video_w, h = g_video_h, frames = g_video_frames;
+    if (!w || !h || !frames) return;
+    uint32_t at = 0;
+    if (g_hbink && g_hbink_gen == g_video_gen) {
+        uint32_t v[5];
+        std::memcpy(v, ptr<uint8_t>(g_hbink), 20);
+        if (hbink_matches(v, w, h, frames)) at = g_hbink;
+    }
+    if (!at) at = hbink_find(w, h, frames);
+    if (!at) return; // ainda não criado: tenta de novo daqui a pouco
+    g_hbink = at, g_hbink_gen = g_video_gen;
+    uint32_t v[5];
+    std::memcpy(v, ptr<uint8_t>(at), 20);
+    const uint32_t cut = v[3] + 1 < frames ? v[3] + 1 : frames;
+    std::memcpy(ptr<uint8_t>(at + 8), &cut, 4);
+    g_skip_until_ms = 0;
+    logf("vitart: cena pulada (HBINK em 0x%08x: quadro %u de %u)", at, v[3], frames);
+}
+static bool is_video(const std::string &p) {
+    if (p.size() < 4) return false;
+    std::string e = p.substr(p.size() - 4);
+    for (char &c : e) c = (char)std::tolower((unsigned char)c);
+    return e == ".bk2";
+}
+// Leitura de um vídeo que o jogador mandou pular: fim de arquivo.
+static bool video_cut(uint32_t vfd);
+static std::mutex g_files_mutex;
+static std::unordered_map<uint32_t, File> g_files;
+static uint32_t g_next_fd = 0x00020001;
+
+static void fill_stat(uint32_t st, const fs::path &p) {
+    std::error_code ec;
+    std::memset(ptr<uint8_t>(st), 0, 0x58);
+    const bool dir = fs::is_directory(p, ec);
+    const uint32_t mode = (dir ? 0x1000u : 0x2000u) | 0x01FFu; // SCE_S_IFDIR/IFREG + rwx
+    wr32(st + 0, mode);
+    wr32(st + 4, dir ? 0x10u : 0x20u);
+    if (!dir) {
+        uint64_t size = (uint64_t)fs::file_size(p, ec);
+        if (auto pt = psarc_patch(p.string())) size = pt->orig + pt->extra.size();
+        wr64(st + 8, size);
+    }
+}
+
+VT_HLE(sceIoOpen) {
+    const std::string path = gstr(arg(ctx, 0));
+    const uint32_t flags = arg(ctx, 1);
+    if (skipped_video(path)) {
+        logf("vitart: vídeo pulado: %s", path.c_str());
+        return ret(ctx, SCE_ERROR_ERRNO_ENOENT);
+    }
+    const std::string hp = host_path(path);
+    int of = _O_BINARY;
+    const uint32_t acc = flags & 3;
+    of |= acc == 1 ? _O_RDONLY : acc == 2 ? _O_WRONLY : _O_RDWR;
+    if (flags & 0x0100) of |= _O_APPEND;
+    if (flags & 0x0200) of |= _O_CREAT;
+    if (flags & 0x0400) of |= _O_TRUNC;
+    if (flags & 0x0800) of |= _O_EXCL;
+    if (of & _O_CREAT) {
+        std::error_code ec;
+        fs::create_directories(fs::path(hp).parent_path(), ec);
+    }
+    const int fd = _open(hp.c_str(), of, _S_IREAD | _S_IWRITE);
+    if (fd < 0) {
+        logf("vitart: sceIoOpen(%s, 0x%x) falhou (%s)", path.c_str(), flags, hp.c_str());
+        return ret(ctx, (flags & 0x0800) && errno == EEXIST ? SCE_ERROR_ERRNO_EEXIST : SCE_ERROR_ERRNO_ENOENT);
+    }
+    const std::lock_guard<std::mutex> lock(g_files_mutex);
+    const uint32_t vfd = g_next_fd++;
+    g_files[vfd].fd = fd;
+    g_files[vfd].path = path;
+    g_files[vfd].video = is_video(path);
+    if (acc == 1) g_files[vfd].patch = psarc_patch(hp);
+    if (g_files[vfd].video) {
+        uint32_t hd[9] = {};
+        _lseeki64(fd, 0, SEEK_SET);
+        if (_read(fd, hd, sizeof hd) == (int)sizeof hd) g_video_frames = hd[2], g_video_w = hd[5], g_video_h = hd[6];
+        _lseeki64(fd, 0, SEEK_SET);
+        g_video_open++;
+        g_video_gen++;
+        video_hd_open(path, hd[2], hd[7], hd[8], 0, 0);
+    }
+    g_files[vfd].skip_gen = g_skip_gen.load();
+    logf("vitart: sceIoOpen(%s, 0x%x) -> 0x%x", path.c_str(), flags, vfd);
+    ret(ctx, vfd);
+}
+
+static int host_fd(uint32_t vfd) {
+    if (vfd == 0x00010001u) return 1;
+    if (vfd == 0x00010002u) return 2;
+    if (vfd == 0x00010000u) return 0;
+    const std::lock_guard<std::mutex> lock(g_files_mutex);
+    auto it = g_files.find(vfd);
+    return it == g_files.end() ? -1 : it->second.fd;
+}
+
+static bool video_cut(uint32_t vfd) {
+    const std::lock_guard<std::mutex> lock(g_files_mutex);
+    auto it = g_files.find(vfd);
+    if (it != g_files.end() && it->second.video) g_video_read_ms = now_ms(); // vídeo tocando
+    static const bool eof_cut = getenv("VITART_SKIP_EOF") != nullptr; // experimento: o Bink congela no fim de arquivo
+    if (!eof_cut || it == g_files.end() || !it->second.video || g_skip_gen.load() == it->second.skip_gen) return false;
+    static uint32_t logged = 0;
+    if (logged != it->second.skip_gen + 1) {
+        logged = it->second.skip_gen + 1;
+        logf("vitart: cena pulada com START: %s", it->second.path.c_str());
+    }
+    return true;
+}
+
+VT_HLE(sceIoClose) {
+    const std::lock_guard<std::mutex> lock(g_files_mutex);
+    auto it = g_files.find(arg(ctx, 0));
+    if (it == g_files.end()) return ret(ctx, SCE_ERROR_ERRNO_EBADF);
+    _close(it->second.fd);
+    if (it->second.video && g_video_open && !--g_video_open) video_hd_close();
+    g_files.erase(it);
+    ret(ctx, 0);
+}
+// Leitura/escrita posicional atômica (várias threads do jogo usam o mesmo descritor).
+static int pio(int fd, uint32_t buf, uint32_t n, int64_t off, bool write) {
+    commit_range(buf, n);
+#ifndef _WIN32
+    const ssize_t r = write ? pwrite(fd, ptr<void>(buf), n, off) : pread(fd, ptr<void>(buf), n, off);
+    if (r < 0) {
+        logf("vitart: E/S posicional falhou (errno %d, buf 0x%08x, %u bytes, offset %lld)", errno, buf, n, (long long)off);
+        return -1;
+    }
+    return (int)r;
+#else
+    HANDLE h = reinterpret_cast<HANDLE>(_get_osfhandle(fd));
+    OVERLAPPED ov{};
+    ov.Offset = (DWORD)off;
+    ov.OffsetHigh = (DWORD)(off >> 32);
+    DWORD done = 0;
+    const BOOL ok = write ? WriteFile(h, ptr<void>(buf), n, &done, &ov) : ReadFile(h, ptr<void>(buf), n, &done, &ov);
+    if (!ok && GetLastError() != ERROR_HANDLE_EOF) {
+        logf("vitart: E/S posicional falhou (erro %lu, buf 0x%08x, %u bytes, offset %lld)", GetLastError(), buf, n, (long long)off);
+        return -1;
+    }
+    return (int)done;
+#endif
+}
+
+// VITART_PSARCLOG=1 (diagnóstico do carregador de mods): cada leitura do psarc com o instante, o offset, o tamanho, o
+// buffer do jogo e a entrada da TOC que contém o offset, em psarc_reads.txt.
+static void psarc_log(const PsarcPatch &pt, uint32_t buf, uint32_t n, int64_t off) {
+    static FILE *f = getenv("VITART_PSARCLOG") ? fopen("psarc_reads.txt", "w") : nullptr;
+    if (!f || pt.toc.size() < 32) return;
+    static const auto t0 = std::chrono::steady_clock::now();
+    const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    const uint32_t ent = (uint32_t)be(&pt.toc[16], 4), cnt = (uint32_t)be(&pt.toc[20], 4), block = (uint32_t)be(&pt.toc[24], 4);
+    const int w = block <= 0x10000 ? 2 : block <= 0x1000000 ? 3 : 4;
+    const size_t tab_at = 32 + (size_t)cnt * ent;
+    int hit = -1;
+    for (uint32_t i = 0; i < cnt && 32 + (size_t)(i + 1) * ent <= pt.toc.size(); i++) {
+        const uint8_t *e = &pt.toc[32 + (size_t)i * ent];
+        const uint64_t o = be(e + 25, 5), sz = be(e + 20, 5), bi = be(e + 16, 4);
+        if ((uint64_t)off < o) continue;
+        uint64_t raw = 0; // tamanho no psarc: a soma dos blocos (0 = bloco cheio)
+        for (uint64_t k = 0; k * block < sz; k++) {
+            const size_t at = tab_at + (size_t)(bi + k) * w;
+            const uint64_t z = at + w <= pt.toc.size() ? be(&pt.toc[at], w) : 0;
+            raw += z ? z : block;
+        }
+        if ((uint64_t)off < o + raw) {
+            hit = (int)i;
+            break;
+        }
+    }
+    fprintf(f, "%9.3f off=%010llx n=%8u buf=%08x %s entrada=%d\n", t, (long long)off, n, buf,
+            off < (int64_t)pt.toc.size() ? "TOC" : off >= (int64_t)pt.orig ? "extra" : "psarc", hit);
+    fflush(f);
+}
+
+// Leitura de um psarc com trocas: TOC remendada, psarc original e arquivos extras no fim.
+static int patched_read(int fd, const PsarcPatch &pt, uint32_t buf, uint32_t n, int64_t off) {
+    psarc_log(pt, buf, n, off);
+    if (off < (int64_t)pt.toc.size() && n > pt.guest_len && off + n <= (int64_t)pt.toc.size()) {
+        auto &w = const_cast<PsarcPatch &>(pt); // a cópia da TOC no jogo: mods_hot_apply a reescreve
+        w.guest_buf = buf, w.guest_off = (uint32_t)off, w.guest_len = n;
+    }
+    commit_range(buf, n);
+    uint8_t *dst = ptr<uint8_t>(buf);
+    const int64_t total = (int64_t)(pt.orig + pt.extra.size());
+    if (off >= total) return 0;
+    if (off + n > total) n = (uint32_t)(total - off);
+    uint32_t done = 0;
+    while (done < n) {
+        const int64_t o = off + done;
+        uint32_t chunk = n - done;
+        if (o < (int64_t)pt.toc.size()) {
+            chunk = (uint32_t)std::min<int64_t>(chunk, (int64_t)pt.toc.size() - o);
+            memcpy(dst + done, pt.toc.data() + o, chunk);
+        } else if (o >= (int64_t)pt.orig) {
+            memcpy(dst + done, pt.extra.data() + (o - pt.orig), chunk);
+        } else {
+            chunk = (uint32_t)std::min<int64_t>(chunk, (int64_t)pt.orig - o);
+            const int r = pio(fd, buf + done, chunk, o, false);
+            if (r <= 0) break;
+            chunk = (uint32_t)r;
+        }
+        done += chunk;
+    }
+    return (int)done;
+}
+static std::shared_ptr<PsarcPatch> file_patch(uint32_t vfd, int64_t **pos) {
+    const std::lock_guard<std::mutex> lock(g_files_mutex);
+    auto it = g_files.find(vfd);
+    if (it == g_files.end() || !it->second.patch) return nullptr;
+    *pos = &it->second.pos;
+    return it->second.patch;
+}
+
+VT_HLE(sceIoRead) {
+    const int fd = host_fd(arg(ctx, 0));
+    if (fd < 0) return ret(ctx, SCE_ERROR_ERRNO_EBADF);
+    if (video_cut(arg(ctx, 0))) return ret(ctx, 0);
+    int64_t *pos = nullptr;
+    if (auto pt = file_patch(arg(ctx, 0), &pos)) {
+        const int n = patched_read(fd, *pt, arg(ctx, 1), arg(ctx, 2), *pos);
+        if (n > 0) *pos += n;
+        return ret(ctx, n < 0 ? SCE_ERROR_ERRNO_EBADF : (uint32_t)n);
+    }
+    commit_range(arg(ctx, 1), arg(ctx, 2));
+    const int n = _read(fd, ptr<void>(arg(ctx, 1)), arg(ctx, 2));
+    ret(ctx, n < 0 ? SCE_ERROR_ERRNO_EBADF : (uint32_t)n);
+}
+void ngs_voice_pressure(); // hle_ngs.cpp: vozes do NGS presas
+VT_HLE(sceIoWrite) {
+    const int fd = host_fd(arg(ctx, 0));
+    if (fd < 0) return ret(ctx, SCE_ERROR_ERRNO_EBADF);
+    if (fd == 1 || fd == 2) {
+        std::string s(ptr<char>(arg(ctx, 1)), arg(ctx, 2));
+        while (!s.empty() && s.back() == '\n') s.pop_back();
+        logf("[jogo] %s", s.c_str());
+        if (s.find("Could not allocate voice") != std::string::npos) ngs_voice_pressure(); // hle_ngs.cpp
+        return ret(ctx, arg(ctx, 2));
+    }
+    commit_range(arg(ctx, 1), arg(ctx, 2));
+    const int n = _write(fd, ptr<void>(arg(ctx, 1)), arg(ctx, 2));
+    ret(ctx, n < 0 ? SCE_ERROR_ERRNO_EBADF : (uint32_t)n);
+}
+VT_HLE(sceIoLseek) {
+    // (fd, SceOff offset em r2:r3, whence na pilha) -> SceOff em r0:r1
+    const int fd = host_fd(arg(ctx, 0));
+    if (fd < 0) return ret64(ctx, (uint64_t)(int64_t)(int32_t)SCE_ERROR_ERRNO_EBADF);
+    const int64_t off = (int64_t)((uint64_t)arg(ctx, 2) | ((uint64_t)arg(ctx, 3) << 32));
+    const int whence = (int)arg(ctx, 4);
+    int64_t *pos = nullptr;
+    if (auto pt = file_patch(arg(ctx, 0), &pos)) {
+        const int64_t base = whence == SEEK_SET ? 0 : whence == SEEK_CUR ? *pos : (int64_t)(pt->orig + pt->extra.size());
+        *pos = base + off;
+        return ret64(ctx, (uint64_t)*pos);
+    }
+    ret64(ctx, (uint64_t)_lseeki64(fd, off, whence));
+}
+VT_HLE(sceIoPread) {
+    // (fd, buf, nbyte, SceOff offset na pilha [sp], alinhado a 8)
+    const int fd = host_fd(arg(ctx, 0));
+    if (fd < 0) return ret(ctx, SCE_ERROR_ERRNO_EBADF);
+    const int64_t off = (int64_t)((uint64_t)arg(ctx, 4) | ((uint64_t)arg(ctx, 5) << 32));
+    if (video_cut(arg(ctx, 0))) return ret(ctx, 0);
+    int64_t *pos = nullptr;
+    if (auto pt = file_patch(arg(ctx, 0), &pos)) {
+        const int n = patched_read(fd, *pt, arg(ctx, 1), arg(ctx, 2), off);
+        return ret(ctx, n < 0 ? SCE_ERROR_ERRNO_EBADF : (uint32_t)n);
+    }
+    const int n = pio(fd, arg(ctx, 1), arg(ctx, 2), off, false);
+    ret(ctx, n < 0 ? SCE_ERROR_ERRNO_EBADF : (uint32_t)n);
+}
+VT_HLE(sceIoPwrite) {
+    const int fd = host_fd(arg(ctx, 0));
+    if (fd < 0) return ret(ctx, SCE_ERROR_ERRNO_EBADF);
+    const int64_t off = (int64_t)((uint64_t)arg(ctx, 4) | ((uint64_t)arg(ctx, 5) << 32));
+    const int n = pio(fd, arg(ctx, 1), arg(ctx, 2), off, true);
+    ret(ctx, n < 0 ? SCE_ERROR_ERRNO_EBADF : (uint32_t)n);
+}
+VT_HLE(sceIoSync) { ret(ctx, 0); }
+VT_HLE(sceIoSyncByFd) { ret(ctx, 0); }
+VT_HLE(sceIoDevctl) { ret(ctx, 0); }
+VT_HLE(sceIoIoctl) { ret(ctx, 0); }
+VT_HLE(sceIoChstat) { ret(ctx, 0); }
+VT_HLE(sceIoGetstat) {
+    if (skipped_video(gstr(arg(ctx, 0)))) return ret(ctx, SCE_ERROR_ERRNO_ENOENT);
+    const fs::path p = host_path(gstr(arg(ctx, 0)));
+    std::error_code ec;
+    if (!fs::exists(p, ec)) return ret(ctx, SCE_ERROR_ERRNO_ENOENT);
+    fill_stat(arg(ctx, 1), p);
+    ret(ctx, 0);
+}
+VT_HLE(sceIoGetstatByFd) {
+    std::string path;
+    {
+        const std::lock_guard<std::mutex> lock(g_files_mutex);
+        auto it = g_files.find(arg(ctx, 0));
+        if (it == g_files.end()) return ret(ctx, SCE_ERROR_ERRNO_EBADF);
+        path = it->second.path;
+    }
+    fill_stat(arg(ctx, 1), host_path(path));
+    ret(ctx, 0);
+}
+VT_HLE(sceIoMkdir) {
+    std::error_code ec;
+    fs::create_directories(host_path(gstr(arg(ctx, 0))), ec);
+    ret(ctx, 0);
+}
+VT_HLE(sceIoRmdir) {
+    std::error_code ec;
+    ret(ctx, fs::remove(host_path(gstr(arg(ctx, 0))), ec) ? 0 : SCE_ERROR_ERRNO_ENOENT);
+}
+VT_HLE(sceIoRemove) {
+    std::error_code ec;
+    ret(ctx, fs::remove(host_path(gstr(arg(ctx, 0))), ec) ? 0 : SCE_ERROR_ERRNO_ENOENT);
+}
+VT_HLE(sceIoRename) {
+    std::error_code ec;
+    fs::rename(host_path(gstr(arg(ctx, 0))), host_path(gstr(arg(ctx, 1))), ec);
+    ret(ctx, ec ? SCE_ERROR_ERRNO_ENOENT : 0);
+}
+VT_HLE(sceIoDopen) {
+    const std::string path = gstr(arg(ctx, 0));
+    std::error_code ec;
+    fs::directory_iterator it(host_path(path), ec);
+    if (ec) return ret(ctx, SCE_ERROR_ERRNO_ENOENT);
+    const std::lock_guard<std::mutex> lock(g_files_mutex);
+    const uint32_t vfd = g_next_fd++;
+    File &f = g_files[vfd];
+    f.is_dir = true;
+    f.path = path;
+    f.it = std::move(it);
+    ret(ctx, vfd);
+}
+VT_HLE(sceIoDread) {
+    // (fd, SceIoDirent*): stat (0x58) + d_name[256] + d_private + dummy
+    const std::lock_guard<std::mutex> lock(g_files_mutex);
+    auto fit = g_files.find(arg(ctx, 0));
+    if (fit == g_files.end() || !fit->second.is_dir) return ret(ctx, SCE_ERROR_ERRNO_EBADF);
+    File &f = fit->second;
+    if (f.it == f.end) return ret(ctx, 0);
+    const uint32_t d = arg(ctx, 1);
+    fill_stat(d, f.it->path());
+    const std::string name = f.it->path().filename().string();
+    std::memset(ptr<char>(d + 0x58), 0, 256);
+    std::memcpy(ptr<char>(d + 0x58), name.c_str(), std::min<size_t>(name.size(), 255));
+    std::error_code ec;
+    f.it.increment(ec);
+    ret(ctx, 1);
+}
+VT_HLE(sceIoDclose) {
+    const std::lock_guard<std::mutex> lock(g_files_mutex);
+    ret(ctx, g_files.erase(arg(ctx, 0)) ? 0 : SCE_ERROR_ERRNO_EBADF);
+}
+
+// =============================================================== sceClib*
+VT_HLE(sceClibMemset) {
+    std::memset(ptr<uint8_t>(arg(ctx, 0)), (int)arg(ctx, 1), arg(ctx, 2));
+    ret(ctx, arg(ctx, 0));
+}
+
+// printf do guest: argumentos variádicos pela AAPCS (palavras r0-r3 e depois a pilha; valores de
+// 64 bits começam em palavra par).
+static std::string guest_format(arc_ctx *ctx, int first) {
+    const char *f = gstr(arg(ctx, first));
+    int w = first + 1;
+    auto next32 = [&]() { return arg(ctx, w++); };
+    auto next64 = [&]() {
+        if (w & 1) w++;
+        const uint64_t lo = arg(ctx, w), hi = arg(ctx, w + 1);
+        w += 2;
+        return lo | (hi << 32);
+    };
+    std::string out;
+    char buf[512];
+    while (*f) {
+        if (*f != '%') {
+            out += *f++;
+            continue;
+        }
+        std::string spec = "%";
+        f++;
+        while (*f && std::strchr("-+ #0123456789.*", *f)) {
+            if (*f == '*') spec += std::to_string((int)next32());
+            else spec += *f;
+            f++;
+        }
+        int longs = 0;
+        bool sz = false;
+        while (*f == 'l' || *f == 'h' || *f == 'z' || *f == 'j' || *f == 't') {
+            if (*f == 'l') longs++;
+            if (*f == 'z' || *f == 'j' || *f == 't') sz = true;
+            f++;
+        }
+        const char c = *f ? *f++ : 0;
+        switch (c) {
+        case 'd': case 'i':
+            if (longs >= 2) snprintf(buf, sizeof buf, (spec + "lld").c_str(), (long long)next64());
+            else snprintf(buf, sizeof buf, (spec + "d").c_str(), (int)next32());
+            out += buf;
+            break;
+        case 'u': case 'x': case 'X': case 'o':
+            if (longs >= 2) snprintf(buf, sizeof buf, (spec + "ll" + c).c_str(), (unsigned long long)next64());
+            else snprintf(buf, sizeof buf, (spec + c).c_str(), (unsigned)next32());
+            out += buf;
+            break;
+        case 'p':
+            snprintf(buf, sizeof buf, "0x%08x", next32());
+            out += buf;
+            break;
+        case 'c':
+            snprintf(buf, sizeof buf, (spec + "c").c_str(), (int)next32());
+            out += buf;
+            break;
+        case 's': {
+            const uint32_t a = next32();
+            snprintf(buf, sizeof buf, (spec + "s").c_str(), a ? gstr(a) : "(null)");
+            out += buf;
+            break;
+        }
+        case 'f': case 'F': case 'e': case 'E': case 'g': case 'G': case 'a': {
+            const uint64_t bits = next64();
+            double d;
+            std::memcpy(&d, &bits, 8);
+            snprintf(buf, sizeof buf, (spec + c).c_str(), d);
+            out += buf;
+            break;
+        }
+        case '%':
+            out += '%';
+            break;
+        default:
+            out += spec;
+            if (c) out += c;
+        }
+        (void)sz;
+    }
+    return out;
+}
+
+VT_HLE(sceClibPrintf) {
+    std::string s = guest_format(ctx, 0);
+    while (!s.empty() && s.back() == '\n') s.pop_back();
+    logf("[jogo] %s", s.c_str());
+    if (s.find("Could not allocate voice") != std::string::npos) ngs_voice_pressure(); // hle_ngs.cpp
+    ret(ctx, (uint32_t)s.size());
+}
+VT_HLE(sceClibSnprintf) {
+    const std::string s = guest_format(ctx, 2);
+    const uint32_t dst = arg(ctx, 0), n = arg(ctx, 1);
+    if (n) {
+        const size_t k = std::min<size_t>(s.size(), n - 1);
+        std::memcpy(ptr<char>(dst), s.data(), k);
+        ptr<char>(dst)[k] = 0;
+    }
+    ret(ctx, (uint32_t)s.size());
+}
+
+} // namespace vt

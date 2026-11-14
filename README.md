@@ -98,7 +98,7 @@ O God of War Collection do PS Vita (God of War e God of War II) rodando **nativo
 3. Copie o `gowHD_PSV.pkg` e o `work.bin` para `Download` ou `Documents`. Se o lançador não achar, toque na linha e escolha o arquivo.
 4. Toque em **Instalar o jogo**. As texturas HD são opcionais (+1,7 GB).
 
-Já tem a pasta do porte copiada do PC? Use **"Já tenho a pasta copiada do PC"** no painel de instalação.
+Já tem a pasta do port copiada do PC? Use **"Já tenho a pasta copiada do PC"** no painel de instalação.
 
 ### Como compilar
 

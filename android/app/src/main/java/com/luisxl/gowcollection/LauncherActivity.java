@@ -565,7 +565,7 @@ public final class LauncherActivity extends Activity {
             atalho(c, cx, cy, F_DRIVER);
             if ((foco >= F_TROFEUS && foco <= F_DRIVER) || foco == F_GITHUB) {
                 String r = foco == F_GITHUB ? "GitHub  ·  luisxl15" : foco == F_TROFEUS ? Tr.t("Troféus") : foco == F_IDIOMA ? Tr.t("Idioma: ") + Idioma.nome(Idioma.atual(act))
-                        : foco == F_TELA ? Tr.t("Tela: proporção")
+                        : foco == F_TELA ? Tr.t("Tela: proporção e texturas HD")
                         : foco == F_CONTROLES ? Tr.t("Controles na tela") : Tr.t("Driver de vídeo");
                 Paint t = texto(13, true, 0xFFFFFFFF);
                 t.setTextAlign(Paint.Align.RIGHT);
@@ -1191,7 +1191,7 @@ public final class LauncherActivity extends Activity {
                 c.drawText("!", ar.left + 14 * dp, ar.centerY() + at.getTextSize() * 0.36f, ai);
                 c.drawText(cortar(av, at, ar.width() - 40 * dp), ar.left + 28 * dp, ar.centerY() + at.getTextSize() * 0.36f, at);
             }
-            int n = Opcoes.PROPORCOES.length;
+            int n = Opcoes.PROPORCOES.length + 1; // + a linha das texturas HD
             float y0 = y + 112 * dp, alt = 56 * dp, largura = Math.min(w - 2 * gx, 720 * dp);
             int vis = Math.max(2, (int) ((h - y0 - 72 * dp) / alt));
             int topoA = Math.max(0, Math.min(escolhido - vis + 1, n - vis));
@@ -1211,7 +1211,15 @@ public final class LauncherActivity extends Activity {
                     c.drawRoundRect(new RectF(r.left, r.top + 10 * dp, r.left + 3 * dp, r.bottom - 10 * dp), 2 * dp, 2 * dp, f);
                 }
                 String nome, det, selo = null;
-                {
+                if (i == n - 1) { // texturas HD: instalar depois ou apagar
+                    boolean tem = texturasInstaladas();
+                    nome = Tr.t("Texturas HD");
+                    if (etapaTex != null) det = etapaTex + (totalTex > 0 ? "  " + Math.round(feitoTex * 100.0 / totalTex) + "%" : "");
+                    else if (erroTex != null) det = erroTex;
+                    else if (confirmarTex) det = Tr.t("Toque de novo para apagar as texturas HD (1,7 GB)");
+                    else det = tem ? Tr.t("Instaladas: toque para apagar e liberar 1,7 GB") : Tr.t("Não instaladas: toque para baixar e instalar (+1,7 GB)");
+                    if (tem && etapaTex == null) selo = Tr.t("Em uso");
+                } else {
                     Object[] o = Opcoes.PROPORCOES[i];
                     float a = (float) o[2];
                     nome = (String) o[1];
@@ -1236,7 +1244,64 @@ public final class LauncherActivity extends Activity {
             dicas(c, w, h, Tr.t("Selecionar"));
         }
 
+        // ---------------------------------------------------------------- texturas HD (o pacote opcional da release)
+        private volatile String etapaTex, erroTex;
+        private volatile long feitoTex, totalTex;
+        private boolean confirmarTex;
+
+        private boolean texturasInstaladas() {
+            File d = new File(raiz, "data/texpack");
+            String[] l = d.list();
+            return l != null && l.length > 0;
+        }
+
+        private void acaoTexturas() {
+            if (etapaTex != null) return; // já trabalhando
+            erroTex = null;
+            final File r = raiz;
+            if (texturasInstaladas()) {
+                if (!confirmarTex) { confirmarTex = true; invalidate(); return; }
+                confirmarTex = false;
+                etapaTex = Tr.t("Apagando as texturas HD");
+                new Thread(() -> {
+                    Atualizador.apagar(new File(r, "data/texpack"));
+                    etapaTex = null;
+                    postInvalidate();
+                }, "apagar-texturas").start();
+                invalidate();
+                return;
+            }
+            final byte[] K = Instalador.chaveGuardada(act);
+            if (K == null) { // pasta copiada do PC: sem a chave, as texturas vêm da pasta data/texpack do PC
+                erroTex = Tr.t("Instalado pela pasta do PC: copie data/texpack do PC");
+                invalidate();
+                return;
+            }
+            etapaTex = Tr.t("Procurando a versão mais nova");
+            new Thread(() -> {
+                File trab = new File(r, ".texturas");
+                Instalador.Aviso av = (e, f, t) -> { etapaTex = e; feitoTex = f; totalTex = t; postInvalidate(); };
+                Instalador.Cancelar cn = () -> { };
+                try {
+                    Instalador.Release rel = Instalador.ultimaRelease();
+                    if (rel == null) throw new Instalador.Erro(Tr.t("Ainda não há uma versão publicada no GitHub"));
+                    Instalador.baixarGrupo(rel, "opcional-texturas_hd", trab, av, cn);
+                    Instalador.instalar(Instalador.abrir(trab, "opcional-texturas_hd", K), K, r, Tr.t("Instalando as texturas HD"), av, cn);
+                    Atualizador.apagar(trab);
+                } catch (Exception e) {
+                    erroTex = e.getMessage() != null ? e.getMessage() : e.toString();
+                } finally {
+                    etapaTex = null;
+                    totalTex = 0;
+                    postInvalidate();
+                }
+            }, "texturas").start();
+            invalidate();
+        }
+
         private void escolherProporcao() {
+            if (escolhido == Opcoes.PROPORCOES.length) { acaoTexturas(); return; }
+            confirmarTex = false;
             {
                 Opcoes.gravar(raiz, "aspect", (String) Opcoes.PROPORCOES[escolhido][0]);
                 Toast.makeText(act, Tr.t("Proporção ") + Opcoes.PROPORCOES[escolhido][1] + Tr.t(" (vale na próxima abertura do jogo)"), Toast.LENGTH_SHORT).show();
@@ -2404,7 +2469,7 @@ public final class LauncherActivity extends Activity {
                 }
             }
             if (telaOp) {
-                int n = Opcoes.PROPORCOES.length;
+                int n = Opcoes.PROPORCOES.length + 1;
                 switch (k) {
                     case KeyEvent.KEYCODE_DPAD_UP: escolhido = (escolhido + n - 1) % n; invalidate(); return true;
                     case KeyEvent.KEYCODE_DPAD_DOWN: escolhido = (escolhido + 1) % n; invalidate(); return true;

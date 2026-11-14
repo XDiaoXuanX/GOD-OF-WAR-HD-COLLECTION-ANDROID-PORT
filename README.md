@@ -106,12 +106,22 @@ tools/            traduções, extrator do PKG, arte gerada por código
 scripts/          compilação para Android
 ```
 
-### Apoie o projeto
+### 💛 Apoie o projeto
 
-[![LivePix](https://img.shields.io/badge/LivePix-apoiar-00C853)](https://livepix.gg/luisxl15)
-[![PayPal](https://img.shields.io/badge/PayPal-doar-00457C?logo=paypal&logoColor=white)](https://www.paypal.com/donate/?business=7MWMRNN92Z464)
+O projeto é feito no tempo livre e é de graça. Se ele te ajudou e você quiser apoiar para mantê-lo vivo, qualquer
+valor ajuda:
 
-Doações não compram suporte: o projeto continua sendo de demonstração.
+<div align="center">
+
+[![LivePix](https://img.shields.io/badge/LivePix-doe%20via%20Pix-00c2a8?style=for-the-badge)](https://livepix.gg/luisxl15) [![PayPal](https://img.shields.io/badge/PayPal-doe%20com%20cart%C3%A3o%20ou%20PayPal-003087?style=for-the-badge&logo=paypal&logoColor=white)](https://www.paypal.com/donate/?business=7MWMRNN92Z464&no_recurring=0&item_name=God+of+War+HD+Collection)
+
+<a href="https://livepix.gg/luisxl15"><img src="docs/img/livepix-qr.png" width="180" alt="QR Code do LivePix: livepix.gg/luisxl15"></a>
+
+**[livepix.gg/luisxl15](https://livepix.gg/luisxl15)**: Pix, e a sua mensagem aparece na live.
+
+**[PayPal](https://www.paypal.com/donate/?business=7MWMRNN92Z464&no_recurring=0&item_name=God+of+War+HD+Collection)**: cartão ou saldo do PayPal, de qualquer país.
+
+</div>
 
 ---
 
@@ -176,12 +186,22 @@ tools/            translations, PKG extractor, code-generated art
 scripts/          Android build
 ```
 
-### Support the project
+### 💛 Support the project
 
-[![LivePix](https://img.shields.io/badge/LivePix-support-00C853)](https://livepix.gg/luisxl15)
-[![PayPal](https://img.shields.io/badge/PayPal-donate-00457C?logo=paypal&logoColor=white)](https://www.paypal.com/donate/?business=7MWMRNN92Z464)
+This project is made in my free time and is free to use. If it helped you and you'd like to help keep it alive, any
+amount helps:
 
-Donations do not buy support: this remains a demonstration project.
+<div align="center">
+
+[![PayPal](https://img.shields.io/badge/PayPal-donate%20with%20card%20or%20PayPal-003087?style=for-the-badge&logo=paypal&logoColor=white)](https://www.paypal.com/donate/?business=7MWMRNN92Z464&no_recurring=0&item_name=God+of+War+HD+Collection) [![LivePix](https://img.shields.io/badge/LivePix-Pix%20(Brazil)-00c2a8?style=for-the-badge)](https://livepix.gg/luisxl15)
+
+<a href="https://livepix.gg/luisxl15"><img src="docs/img/livepix-qr.png" width="180" alt="LivePix QR code: livepix.gg/luisxl15"></a>
+
+**[PayPal](https://www.paypal.com/donate/?business=7MWMRNN92Z464&no_recurring=0&item_name=God+of+War+HD+Collection)**: card or PayPal balance, from any country.
+
+**[livepix.gg/luisxl15](https://livepix.gg/luisxl15)**: Brazilian Pix, and your message shows up on the live stream.
+
+</div>
 
 ---
 

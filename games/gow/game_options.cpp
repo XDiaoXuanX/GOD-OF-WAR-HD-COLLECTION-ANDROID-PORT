@@ -79,7 +79,11 @@ struct Options {
     bool tex = true, audio = true, counter = false, borderless = false;
     uint32_t fps = 1; // 1 = 30, 2 = 60, 3 = máximo (taxa do monitor, sem acelerar o jogo)
     bool vsync = true; // desligado: sem limite de quadros e sem esperar o vblank
+#ifdef __ANDROID__
+    uint32_t scale = 1; // celular: a resolução do Vita (1x) até o jogador mudar no menu
+#else
     uint32_t scale = 0; // 0 = automática pelo monitor
+#endif
     bool auto_qte = false; // QTE automático (game_qte_auto)
     bool inf_health = false, inf_magic = false, inf_rage = false; // cheats (cheats_tick)
     bool hp_bars = true; // barras de vida dos inimigos (enemy_hp.cpp)

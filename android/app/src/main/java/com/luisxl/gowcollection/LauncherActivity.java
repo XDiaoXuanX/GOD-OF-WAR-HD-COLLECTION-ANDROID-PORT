@@ -2150,6 +2150,7 @@ public final class LauncherActivity extends Activity {
                     }
                     Instalador.extrairApp(act, pkg, rif, new File(raizI, "game"), av, cn);
                     Instalador.guardarChave(act, K);
+                    Opcoes.gravar(raizI, "resolution", "1"); // celular: começa na resolução do Vita (1x); o menu do jogo muda
                     if (rel != null) act.getSharedPreferences("atualizacao", android.content.Context.MODE_PRIVATE).edit().putString("dados", rel.tag).apply();
                     Atualizador.apagar(trabalho);
                     post(() -> {

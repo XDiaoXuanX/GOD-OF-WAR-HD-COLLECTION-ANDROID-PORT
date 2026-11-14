@@ -142,6 +142,9 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         logs.mkdirs();
         nativeSetenv("VITART_VULKAN", "1");
         nativeSetenv("VITART_LANG", String.valueOf(Idioma.atual(this))); // o idioma do lançador (jogo e troféus)
+        // o language= do ini manda no jogo (e nos menus do vitart, que vêm da tradução): segue o do lançador a cada
+        // abertura, senão trocar o idioma do Android ou do lançador deixava o jogo no idioma da instalação
+        Opcoes.gravar(raiz, "language", Idioma.traducao(Idioma.atual(this)));
         nativeSetenv("VITART_SPV_DIR", new File(raiz, "shaders").getPath());
         limitesDoPack(); // antes do vitart_env.txt: ele pode mudar
         // diagnóstico: <pasta>/vitart_env.txt com CHAVE=valor por linha (as variáveis VITART_* do PC)

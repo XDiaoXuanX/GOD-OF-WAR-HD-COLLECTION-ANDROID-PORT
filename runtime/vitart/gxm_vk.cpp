@@ -1022,6 +1022,18 @@ static bool create_swapchain() {
         // relógios se desencontravam e um quadro repetia de tempos em tempos -- engasgo visível sem travada no log).
         std::vector<VkPresentModeKHR> pref = {VK_PRESENT_MODE_MAILBOX_KHR};
         if (g_fifo && g_vsync && !getenv("VITART_NOVSYNC")) pref.clear(); // FIFO, o padrão acima
+#ifdef __ANDROID__
+        // celular: FIFO sempre que o VSync está ligado. Com mailbox, na Mali-G52 a imagem piscava a cada toque na
+        // tela (os controles por cima mudam a composição do SurfaceFlinger e o mailbox mostrava quadros fora de
+        // ordem); o compositor do Android já dá o ritmo. VITART_MAILBOX=1 (teste) volta ao mailbox.
+        if (g_vsync && !getenv("VITART_MAILBOX") && !getenv("VITART_NOVSYNC")) pref.clear();
+        // na Mali (ARM, vendorID 0x13B5) FIFO mesmo com o VSync desligado: o piscar ao tocar vinha do mailbox
+        {
+            VkPhysicalDeviceProperties pp{};
+            vkGetPhysicalDeviceProperties(g_phys, &pp);
+            if (pp.vendorID == 0x13B5 && !getenv("VITART_MAILBOX")) pref.clear();
+        }
+#endif
         if (getenv("VITART_NOVSYNC") || !g_vsync) pref.insert(pref.begin(), VK_PRESENT_MODE_IMMEDIATE_KHR);
         for (VkPresentModeKHR m : pref)
             if (std::find(modes.begin(), modes.end(), m) != modes.end()) {

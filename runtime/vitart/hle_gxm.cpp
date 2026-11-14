@@ -19,6 +19,8 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <cerrno>
+#include <iterator>
 
 #include <chrono>
 #include <cstdlib>
@@ -579,7 +581,17 @@ static void texpack_start(uint64_t key) {
             g_tp_running++;
         }
         int x = 0, y = 0, c = 0;
-        if (stbi_uc *img = stbi_load(path.c_str(), &x, &y, &c, 4)) {
+        stbi_uc *img = stbi_load(path.c_str(), &x, &y, &c, 4);
+        if (!img) { // no celular o atlas de ícones do PS5 falhava pelo caminho: tenta de novo lendo o arquivo inteiro
+            const int e = errno;
+            const char *motivo = stbi_failure_reason();
+            std::ifstream f(path, std::ios::binary);
+            std::vector<uint8_t> buf((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            if (!buf.empty()) img = stbi_load_from_memory(buf.data(), (int)buf.size(), &x, &y, &c, 4);
+            logf("vitart: pack de texturas: %s falhou no stbi_load (%s, errno %d); da memória (%zu bytes): %s", path.c_str(),
+                 motivo ? motivo : "?", e, buf.size(), img ? "ok" : (stbi_failure_reason() ? stbi_failure_reason() : "?"));
+        }
+        if (img) {
             job->px = std::make_shared<std::vector<uint8_t>>(img, img + (size_t)x * y * 4);
             job->w = (uint32_t)x, job->h = (uint32_t)y;
             stbi_image_free(img);

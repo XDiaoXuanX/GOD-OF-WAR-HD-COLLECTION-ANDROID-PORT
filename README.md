@@ -26,6 +26,27 @@
 >
 > **🇺🇸** This repository is the only official source. APKs from other sites, APKVISION or YouTube channels with shortened links may contain malware.
 
+---
+
+## 💛 Apoie o projeto
+
+O projeto é feito no tempo livre e é de graça. Se ele te ajudou e você quiser apoiar para mantê-lo vivo, qualquer
+valor ajuda:
+
+<div align="center">
+
+[![LivePix](https://img.shields.io/badge/LivePix-doe%20via%20Pix-00c2a8?style=for-the-badge)](https://livepix.gg/luisxl15) [![PayPal](https://img.shields.io/badge/PayPal-doe%20com%20cart%C3%A3o%20ou%20PayPal-003087?style=for-the-badge&logo=paypal&logoColor=white)](https://www.paypal.com/donate/?business=7MWMRNN92Z464&no_recurring=0&item_name=God+of+War+HD+Collection)
+
+<a href="https://livepix.gg/luisxl15"><img src="docs/img/livepix-qr.png" width="180" alt="QR Code do LivePix: livepix.gg/luisxl15"></a>
+
+**[livepix.gg/luisxl15](https://livepix.gg/luisxl15)**: Pix, e a sua mensagem aparece na live.
+
+**[PayPal](https://www.paypal.com/donate/?business=7MWMRNN92Z464&no_recurring=0&item_name=God+of+War+HD+Collection)**: cartão ou saldo do PayPal, de qualquer país.
+
+</div>
+
+---
+
 ## 📸 Capturas de tela · Screenshots
 
 <div align="center">
@@ -106,26 +127,28 @@ tools/            traduções, extrator do PKG, arte gerada por código
 scripts/          compilação para Android
 ```
 
-### 💛 Apoie o projeto
+---
 
-O projeto é feito no tempo livre e é de graça. Se ele te ajudou e você quiser apoiar para mantê-lo vivo, qualquer
-valor ajuda:
+## 🇺🇸 English
+
+### 💛 Support the project
+
+This project is made in my free time and is free to use. If it helped you and you'd like to help keep it alive, any
+amount helps:
 
 <div align="center">
 
-[![LivePix](https://img.shields.io/badge/LivePix-doe%20via%20Pix-00c2a8?style=for-the-badge)](https://livepix.gg/luisxl15) [![PayPal](https://img.shields.io/badge/PayPal-doe%20com%20cart%C3%A3o%20ou%20PayPal-003087?style=for-the-badge&logo=paypal&logoColor=white)](https://www.paypal.com/donate/?business=7MWMRNN92Z464&no_recurring=0&item_name=God+of+War+HD+Collection)
+[![PayPal](https://img.shields.io/badge/PayPal-donate%20with%20card%20or%20PayPal-003087?style=for-the-badge&logo=paypal&logoColor=white)](https://www.paypal.com/donate/?business=7MWMRNN92Z464&no_recurring=0&item_name=God+of+War+HD+Collection) [![LivePix](https://img.shields.io/badge/LivePix-Pix%20(Brazil)-00c2a8?style=for-the-badge)](https://livepix.gg/luisxl15)
 
-<a href="https://livepix.gg/luisxl15"><img src="docs/img/livepix-qr.png" width="180" alt="QR Code do LivePix: livepix.gg/luisxl15"></a>
+<a href="https://livepix.gg/luisxl15"><img src="docs/img/livepix-qr.png" width="180" alt="LivePix QR code: livepix.gg/luisxl15"></a>
 
-**[livepix.gg/luisxl15](https://livepix.gg/luisxl15)**: Pix, e a sua mensagem aparece na live.
+**[PayPal](https://www.paypal.com/donate/?business=7MWMRNN92Z464&no_recurring=0&item_name=God+of+War+HD+Collection)**: card or PayPal balance, from any country.
 
-**[PayPal](https://www.paypal.com/donate/?business=7MWMRNN92Z464&no_recurring=0&item_name=God+of+War+HD+Collection)**: cartão ou saldo do PayPal, de qualquer país.
+**[livepix.gg/luisxl15](https://livepix.gg/luisxl15)**: Brazilian Pix, and your message shows up on the live stream.
 
 </div>
 
 ---
-
-## 🇺🇸 English
 
 ### What it is
 
@@ -185,23 +208,6 @@ third_party/      libraries used (each with its own license)
 tools/            translations, PKG extractor, code-generated art
 scripts/          Android build
 ```
-
-### 💛 Support the project
-
-This project is made in my free time and is free to use. If it helped you and you'd like to help keep it alive, any
-amount helps:
-
-<div align="center">
-
-[![PayPal](https://img.shields.io/badge/PayPal-donate%20with%20card%20or%20PayPal-003087?style=for-the-badge&logo=paypal&logoColor=white)](https://www.paypal.com/donate/?business=7MWMRNN92Z464&no_recurring=0&item_name=God+of+War+HD+Collection) [![LivePix](https://img.shields.io/badge/LivePix-Pix%20(Brazil)-00c2a8?style=for-the-badge)](https://livepix.gg/luisxl15)
-
-<a href="https://livepix.gg/luisxl15"><img src="docs/img/livepix-qr.png" width="180" alt="LivePix QR code: livepix.gg/luisxl15"></a>
-
-**[PayPal](https://www.paypal.com/donate/?business=7MWMRNN92Z464&no_recurring=0&item_name=God+of+War+HD+Collection)**: card or PayPal balance, from any country.
-
-**[livepix.gg/luisxl15](https://livepix.gg/luisxl15)**: Brazilian Pix, and your message shows up on the live stream.
-
-</div>
 
 ---
 

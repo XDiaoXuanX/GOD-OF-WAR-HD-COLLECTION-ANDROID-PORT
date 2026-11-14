@@ -26,6 +26,23 @@
 >
 > **🇺🇸** This repository is the only official source. APKs from other sites, APKVISION or YouTube channels with shortened links may contain malware.
 
+## 📸 Capturas de tela · Screenshots
+
+<div align="center">
+
+<img src="docs/capturas/lancador.jpg" width="100%" alt="Lançador / Launcher">
+
+| | |
+|:---:|:---:|
+| <img src="docs/capturas/jogo.jpg" alt="Jogo / Gameplay"> | <img src="docs/capturas/trofeus.jpg" alt="Troféus / Trophies"> |
+| **Jogando com os controles na tela** · *Playing with touch controls* | **Troféus** · *Trophies* |
+| <img src="docs/capturas/controles_cristal.jpg" alt="Controles Cristal"> | <img src="docs/capturas/controles_minimal.jpg" alt="Controles Minimalista"> |
+| **Controles Cristal (estilo DualSense)** · *Crystal controls (DualSense-like)* | **Controles Minimalista** · *Minimal controls* |
+| <img src="docs/capturas/tela.jpg" alt="Tela / Screen"> | <img src="docs/capturas/abertura.jpg" alt="Abertura / Boot"> |
+| **Proporção da tela e texturas HD** · *Aspect ratio and HD textures* | **Abertura com o PS Vita em 3D** · *3D PS Vita boot animation* |
+
+</div>
+
 ---
 
 ## 🇧🇷 Português

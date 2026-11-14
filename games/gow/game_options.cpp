@@ -701,14 +701,17 @@ void game_options_tick() {
         if (const char *e = getenv("VITART_ASPECT")) a = (float)std::atof(e); // teste
         float w = a / (720.f / 408.f);
         if (std::fabs(a - 16.f / 9.f) < 0.03f) w = 1.f;
-        // os menus do título (o do GoW1 parte o texto e deixa a borda sem fundo) ficam em 16:9: largo só jogando e até
-        // 60 s depois (a pausa não fica trocando; cada troca refaz os alvos)
+        // menus (título, pausa, Power Up; o do GoW1 parte o texto e deixa a borda sem fundo) ficam em 16:9 com bordas
+        // pretas: largo só jogando. O estado tem de ficar 0,4 s parado antes de trocar (cada troca refaz os alvos, e um
+        // piscar do estado no meio da luta não pode encolher a imagem)
         {
             using clk = std::chrono::steady_clock;
-            static clk::time_point ultimo_jogo{};
+            static bool largo = false;
+            static clk::time_point desde = clk::now();
             const bool jogando = rd32(game_id() == 1 ? 0x812c2e04u : 0x812ec498u) == (game_id() == 1 ? 0xbu : 0xcu);
-            if (jogando) ultimo_jogo = clk::now();
-            if (ultimo_jogo == clk::time_point{} || clk::now() - ultimo_jogo > std::chrono::seconds(60)) w = 1.f;
+            if (jogando == largo) desde = clk::now();
+            else if (clk::now() - desde > std::chrono::milliseconds(400)) largo = jogando, desde = clk::now();
+            if (!largo) w = 1.f;
         }
         gvk::set_aspect_widen(w);
     }

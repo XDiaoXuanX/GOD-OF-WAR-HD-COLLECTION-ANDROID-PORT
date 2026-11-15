@@ -374,6 +374,34 @@ final class Instalador {
         try (InputStream in = h.getInputStream()) {
             j = new JSONObject(new String(lerTudo(in), StandardCharsets.UTF_8));
         }
+        return release(j);
+    }
+
+    // A release mais nova que tem os pacotes do grupo ("dados", "opcional-texturas_hd", "atualizacao"). Uma release
+    // só com o APK novo não leva os 3,8 GB de dados outra vez: o instalador e a atualização buscam cada grupo na mais
+    // nova que o tenha (e quem pula versões ainda recebe o pacote de atualização da release de antes).
+    static Release releaseComGrupo(String grupo) throws Exception {
+        HttpURLConnection h = (HttpURLConnection) new URL("https://api.github.com/repos/" + REPO + "/releases?per_page=20").openConnection();
+        h.setRequestProperty("Accept", "application/vnd.github+json");
+        h.setRequestProperty("User-Agent", "GowCollection-android");
+        h.setConnectTimeout(15000);
+        h.setReadTimeout(30000);
+        if (h.getResponseCode() == 404) return null;
+        if (h.getResponseCode() != 200) throw new Erro("GitHub: " + h.getResponseCode());
+        JSONArray rs;
+        try (InputStream in = h.getInputStream()) {
+            rs = new JSONArray(new String(lerTudo(in), StandardCharsets.UTF_8));
+        }
+        for (int i = 0; i < rs.length(); i++) { // a API devolve da mais nova para a mais antiga
+            JSONObject j = rs.getJSONObject(i);
+            if (j.optBoolean("draft") || j.optBoolean("prerelease")) continue;
+            Release r = release(j);
+            for (Asset a : r.assets) if (a.nome.startsWith(grupo + "__")) return r;
+        }
+        return null;
+    }
+
+    private static Release release(JSONObject j) throws Exception {
         Release r = new Release();
         r.tag = j.optString("tag_name");
         r.notas = j.optString("body");

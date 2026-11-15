@@ -305,7 +305,7 @@ final class Drivers {
         String esc = e.optString("android", AUTO);
         GpuInfo g = GpuInfo.detectar(c);
         // um Mali no automático desenha a tela no driver do aparelho: a metade Android do PanVK falha no gralloc do Mali
-        // Adreno 605-614 (Snapdragon 680/685/665/662/4 Gen 1...) no automático: o Turnip deixa a tela preta nelas
+        // Adreno 605-614 (Snapdragon 680/685/665/662/4 Gen 1...) e 840+ (8 Elite Gen 5) no automático: driver do aparelho
         if (!esc.isEmpty() && adrenoBaixa(g) && MODO_AUTO.equals(e.optString("modo"))) {
             Log.i(TAG, g.nome + " no automático: driver do aparelho, não " + esc);
             return null;
@@ -323,7 +323,12 @@ final class Drivers {
     }
 
     // as Adreno 6xx de entrada (A605/A608/A610/A612/A613): o Turnip não desenha nelas
-    static boolean adrenoBaixa(GpuInfo g) { return g.familia == GpuInfo.Familia.A6XX && g.modelo >= 600 && g.modelo < 615; }
+    static boolean adrenoBaixa(GpuInfo g) {
+        return (g.familia == GpuInfo.Familia.A6XX && g.modelo >= 600 && g.modelo < 615)
+                // Adreno 840 em diante (8 Elite Gen 5): o Turnip ainda não tem o caminho otimizado dela e o jogo rodava
+                // pior que na 830; o driver da Qualcomm é o maduro nessa geração
+                || (g.familia == GpuInfo.Familia.A8XX && g.modelo >= 840);
+    }
 
     static String pelaGpu(GpuInfo g) {
         if (GpuInfo.hal() != null) return null; // PowerVR / Xclipse sem par: o driver do aparelho
@@ -428,7 +433,7 @@ final class Drivers {
         }
         if (adrenoBaixa(g)) {
             if (!AUTO.equals(android(c))) definirAndroid(c, AUTO);
-            av.status(g.nome + Tr.t(": a tela usa o driver do aparelho (o Turnip deixa a tela preta nesta GPU)"));
+            av.status(g.nome + Tr.t(": a tela usa o driver do aparelho (o Turnip não vai bem nesta GPU)"));
             return;
         }
         String revertido = reverterSeDevido(c);

@@ -323,6 +323,12 @@ void barrier(Image &im, VkImageLayout to) {
 // upload e um par de timestamps. A CPU grava uma vaga enquanto a GPU executa a outra.
 constexpr uint32_t kSlots = 2;
 VkCommandBuffer g_cmds[kSlots] = {};
+// Envios de textura do quadro num comando à parte, executado antes do quadro na mesma submissão: assim enviar uma
+// textura nova não fecha a passada de render no meio. Numa GPU que desenha em blocos (Mali, Adreno), cada passada
+// fechada e reaberta grava e relê cor e profundidade inteiras na memória; com as texturas HD chegando (16 MB cada,
+// mais os mipmaps) isso comia boa parte do quadro. VITART_VK_UPLOAD_INLINE=1 volta ao envio dentro do quadro.
+VkCommandBuffer g_upcmds[kSlots] = {};
+bool g_up_open = false;
 VkFence g_fences[kSlots] = {};
 VkDescriptorPool g_dpools[kSlots] = {};
 bool g_pend[kSlots] = {}, g_tsopen[kSlots] = {};
@@ -498,8 +504,16 @@ bool frame_flush(bool wait) {
         g_tsopen[g_fi] = g_qpool != VK_NULL_HANDLE;
         VKC(vkEndCommandBuffer(g_cmd));
         VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-        si.commandBufferCount = 1;
-        si.pCommandBuffers = &g_cmd;
+        VkCommandBuffer cbs[2] = {g_upcmds[g_fi], g_cmd};
+        if (g_up_open) {
+            VKC(vkEndCommandBuffer(g_upcmds[g_fi]));
+            g_up_open = false;
+            si.commandBufferCount = 2;
+            si.pCommandBuffers = cbs;
+        } else {
+            si.commandBufferCount = 1;
+            si.pCommandBuffers = &g_cmd;
+        }
         VKC(vkResetFences(g_dev, 1, &g_fence));
         VKC(vkQueueSubmit(g_queue, 1, &si, g_fence));
         g_stats.submits++;
@@ -704,7 +718,7 @@ void level_barrier(Image &im, uint32_t level, VkImageLayout from, VkImageLayout 
     b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     b.image = im.img;
     b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, level, 1, 0, 1};
-    vkCmdPipelineBarrier(g_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+    vkCmdPipelineBarrier(g_cur, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
 }
 
 uint32_t mip_levels(uint32_t w, uint32_t h) {
@@ -720,13 +734,28 @@ bool upload_texture(Image &im, uint32_t w, uint32_t h, const uint8_t *rgba, bool
         return false;
     g_stats.uploads++;
     const VkDeviceSize at = ring_put(rgba, (VkDeviceSize)w * h * 4, 16);
-    end_pass();
+    // no comando de envios (antes do quadro), sem fechar a passada; fora de um quadro gravando, no próprio g_cmd
+    static const bool inline_up = getenv("VITART_VK_UPLOAD_INLINE") != nullptr;
+    const bool separado = !inline_up && g_recording && g_cur == g_cmd && g_upcmds[g_fi];
+    VkCommandBuffer cb = g_cmd;
+    if (separado) {
+        if (!g_up_open) {
+            VKC(vkResetCommandBuffer(g_upcmds[g_fi], 0));
+            VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+            bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            VKC(vkBeginCommandBuffer(g_upcmds[g_fi], &bi));
+            g_up_open = true;
+        }
+        cb = g_cur = g_upcmds[g_fi];
+    } else {
+        end_pass();
+    }
     barrier(im, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     VkBufferImageCopy c{};
     c.bufferOffset = at;
     c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     c.imageExtent = {w, h, 1};
-    vkCmdCopyBufferToImage(g_cmd, g_ring.buf, im.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
+    vkCmdCopyBufferToImage(cb, g_ring.buf, im.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
     // Níveis seguintes por redução linear do anterior; ao fim todos ficam TRANSFER_SRC.
     for (uint32_t l = 1; l < mips; l++) {
         level_barrier(im, l - 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -735,14 +764,16 @@ bool upload_texture(Image &im, uint32_t w, uint32_t h, const uint8_t *rgba, bool
         bl.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, 0, 1};
         bl.srcOffsets[1] = {(int32_t)std::max(1u, w >> (l - 1)), (int32_t)std::max(1u, h >> (l - 1)), 1};
         bl.dstOffsets[1] = {(int32_t)std::max(1u, w >> l), (int32_t)std::max(1u, h >> l), 1};
-        vkCmdBlitImage(g_cmd, im.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, im.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bl,
+        vkCmdBlitImage(cb, im.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, im.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bl,
                        VK_FILTER_LINEAR);
     }
     if (mips > 1) {
         level_barrier(im, mips - 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
         im.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     }
+    // a barreira vale para tudo que vem depois na fila, inclusive o comando do quadro submetido logo em seguida
     barrier(im, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if (separado) g_cur = g_cmd;
     return true;
 }
 
@@ -1806,6 +1837,7 @@ bool init(bool validation, bool window) {
     cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     cai.commandBufferCount = 1;
     for (auto &cb : g_cmds) VKC(vkAllocateCommandBuffers(g_dev, &cai, &cb));
+    for (auto &cb : g_upcmds) VKC(vkAllocateCommandBuffers(g_dev, &cai, &cb));
     VKC(vkAllocateCommandBuffers(g_dev, &cai, &g_pcmd));
     g_cur = g_cmd;
     VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};

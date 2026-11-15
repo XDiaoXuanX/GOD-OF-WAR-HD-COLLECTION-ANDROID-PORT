@@ -1298,7 +1298,7 @@ public final class LauncherActivity extends Activity {
                 Instalador.Aviso av = (e, f, t) -> { etapaTex = e; feitoTex = f; totalTex = t; postInvalidate(); };
                 Instalador.Cancelar cn = () -> { };
                 try {
-                    Instalador.Release rel = Instalador.ultimaRelease();
+                    Instalador.Release rel = Instalador.releaseComGrupo("opcional-texturas_hd");
                     if (rel == null) throw new Instalador.Erro(Tr.t("Ainda não há uma versão publicada no GitHub"));
                     Instalador.baixarGrupo(rel, "opcional-texturas_hd", trab, av, cn);
                     Instalador.instalar(Instalador.abrir(trab, "opcional-texturas_hd", K), K, r, Tr.t("Instalando as texturas HD"), av, cn);
@@ -2148,7 +2148,7 @@ public final class LauncherActivity extends Activity {
                     File dados = acharLocal("dados");
                     if (dados == null) {
                         av.andou(Tr.t("Procurando a versão mais nova"), 0, 0);
-                        rel = Instalador.ultimaRelease();
+                        rel = Instalador.releaseComGrupo("dados"); // a mais nova que traz os dados (não só o APK)
                         if (rel == null) throw new Instalador.Erro(Tr.t("Ainda não há uma versão publicada no GitHub"));
                         Instalador.baixarGrupo(rel, "dados", trabalho, av, cn);
                         dados = trabalho;
@@ -2156,10 +2156,9 @@ public final class LauncherActivity extends Activity {
                     Instalador.instalar(Instalador.abrir(dados, "dados", K), K, raizI, Tr.t("Instalando os dados do jogo"), av, cn);
                     if (tex) { // opcional: só se a release (ou a pasta) tiver
                         File t = acharLocal("opcional-texturas_hd");
-                        if (t == null && rel != null) {
-                            boolean tem = false;
-                            for (Instalador.Asset a : rel.assets) if (a.nome.startsWith("opcional-texturas_hd__")) tem = true;
-                            if (tem) { Instalador.baixarGrupo(rel, "opcional-texturas_hd", trabalho, av, cn); t = trabalho; }
+                        if (t == null) {
+                            Instalador.Release rt = Instalador.releaseComGrupo("opcional-texturas_hd");
+                            if (rt != null) { Instalador.baixarGrupo(rt, "opcional-texturas_hd", trabalho, av, cn); t = trabalho; }
                         }
                         if (t != null)
                             Instalador.instalar(Instalador.abrir(t, "opcional-texturas_hd", K), K, raizI, Tr.t("Instalando as texturas HD"), av, cn);
@@ -2300,7 +2299,9 @@ public final class LauncherActivity extends Activity {
                             }
                         });
                     } else if (acesso && raiz != null && Pastas.completa(raiz)) {
-                        Atualizador.aplicarDados(act, r, raiz, av, cn);
+                        // o pacote de dados pode estar numa release anterior (a mais nova só com o APK)
+                        Instalador.Release rd = Instalador.releaseComGrupo("atualizacao");
+                        if (rd != null) Atualizador.aplicarDados(act, rd, raiz, av, cn);
                     }
                 } catch (Exception e) {
                     android.util.Log.w("gow", "atualização: " + e);

@@ -331,7 +331,11 @@ bool icon_atlas_available(int mode) { return mode >= 0 && mode < 4 && g_icon_atl
 static void texpack_load();
 static const std::string &tp_path(uint64_t key) {
     auto it = g_texkbm.find(key);
-    return it != g_texkbm.end() ? it->second : g_texpack[key];
+    if (it != g_texkbm.end()) return it->second;
+    // só leitura (sem o operator[], que inseria): também é chamada da thread do pack
+    static const std::string vazio;
+    auto jt = g_texpack.find(key);
+    return jt != g_texpack.end() ? jt->second : vazio;
 }
 bool texpack_available() {
     texpack_load();
@@ -442,7 +446,12 @@ struct TexpackJob {
     std::atomic<bool> done{false};
     std::shared_ptr<std::vector<uint8_t>> px;
     uint32_t w = 0, h = 0;
+    // textura do Vita para o ajuste do alfa, feito na thread (antes era no thread do jogo, ao trocar)
+    std::shared_ptr<const std::vector<uint8_t>> orig;
+    uint32_t ow = 0, oh = 0;
+    bool ajustado = false, recusado = false;
 };
+static bool texpack_ajustar(uint64_t key, const std::vector<uint8_t> &orig, uint32_t ow, uint32_t oh, TexpackJob &job);
 static std::unordered_map<uint64_t, std::shared_ptr<TexpackJob>> g_tp_jobs;
 static std::mutex g_tp_sem_mutex;
 static std::condition_variable g_tp_sem_cv;
@@ -577,12 +586,14 @@ static void texpack_reduzir(std::vector<uint8_t> &px, uint32_t &w, uint32_t &h, 
         px.swap(o), w = nw, h = nh;
     }
 }
-static void texpack_start(uint64_t key) {
+static void texpack_start(uint64_t key, std::shared_ptr<const std::vector<uint8_t>> orig = nullptr, uint32_t ow = 0,
+                          uint32_t oh = 0) {
     if (g_tp_jobs.count(key)) return;
     auto job = std::make_shared<TexpackJob>();
+    job->orig = std::move(orig), job->ow = ow, job->oh = oh;
     g_tp_jobs[key] = job;
     const std::string path = tp_path(key);
-    std::thread([job, path] {
+    std::thread([job, path, key] {
         {
             std::unique_lock<std::mutex> l(g_tp_sem_mutex);
             g_tp_sem_cv.wait(l, [] { return g_tp_running < 3; });
@@ -604,6 +615,13 @@ static void texpack_start(uint64_t key) {
             job->w = (uint32_t)x, job->h = (uint32_t)y;
             stbi_image_free(img);
             texpack_reduzir(*job->px, job->w, job->h, texpack_lado_max());
+            // Assinatura, alfa e recorte aqui, fora do thread do jogo: numa textura de 2048 px são 4 milhões de pixels
+            // passados várias vezes, e feito na hora da troca travava o quadro a cada textura HD que chegava
+            if (job->orig && !job->orig->empty()) {
+                job->recusado = !texpack_ajustar(key, *job->orig, job->ow, job->oh, *job);
+                job->ajustado = true;
+            }
+            job->orig.reset();
         } else {
             logf("vitart: pack de texturas: não abriu %s", path.c_str());
         }
@@ -627,22 +645,36 @@ static std::shared_ptr<std::vector<uint8_t>> texpack_take(uint64_t key, const gx
     g_tp_jobs.erase(it);
     finished = true;
     if (!job->px || orig.empty()) return nullptr;
+    if (!job->ajustado) { // sem a original na partida (não deveria): ajusta aqui, como antes
+        job->recusado = !texpack_ajustar(key, orig, info.width, info.height, *job);
+        job->ajustado = true;
+    }
+    if (job->recusado) {
+        g_texpack_rejected[key] = true;
+        return nullptr;
+    }
+    w = job->w, h = job->h;
+    g_texpack_bytes += job->px->size();
+    static int logged = 0;
+    if (logged++ < 5) logf("vitart: textura trocada pelo pack (%ux%u -> %ux%u)", info.width, info.height, w, h);
+    return job->px;
+}
+// O ajuste do PNG à textura do Vita (roda na thread do pack). false = recusado (PNG vazio).
+static bool texpack_ajustar(uint64_t key, const std::vector<uint8_t> &orig, uint32_t ow_, uint32_t oh_, TexpackJob &jb) {
+    struct InfoWH { uint32_t width, height; } info{ow_, oh_};
+    TexpackJob *job = &jb;
     const std::vector<float> so = texsig(orig.data(), info.width, info.height), sp = texsig(job->px->data(), job->w, job->h);
-    static int rejected = 0, logged = 0;
+    static std::atomic<int> rejected{0};
     // O pack é feito por fãs: o PNG pode ser bem diferente da textura original e entra assim mesmo (o
     // usuário quer a troca). Só um PNG vazio (todo transparente) no lugar de uma textura visível fica de
     // fora: apagaria o objeto.
     double ao = 0, ap = 0;
     for (int c = 0; c < 256; c++) ao += so[256 + c], ap += sp[256 + c];
     if (ap < 0.01 * ao) {
-        g_texpack_rejected[key] = true;
         if (rejected++ < 8) logf("vitart: pack de texturas: %s recusado (PNG vazio)", tp_path(key).c_str());
-        return nullptr;
+        return false;
     }
-    if (g_texkbm.count(key)) { // ícones de teclado e mouse: feitos sobre a textura do Vita, alfa já certo
-        w = job->w, h = job->h;
-        return job->px;
-    }
+    if (g_texkbm.count(key)) return true; // ícones de teclado e mouse: feitos sobre a textura do Vita, alfa já certo
     // Alfa na escala do Vita. O pack vem do PS2: lá 128 é opaco, e várias texturas usam o alfa para outra
     // coisa (valor uniforme, p. ex. 93, ou máscara de brilho), enquanto o shader do Vita lê o alfa como o
     // Vita o gravou. O PNG cru deixava inimigos meio transparentes e recortes onde o Vita não tem nenhum.
@@ -662,7 +694,7 @@ static std::shared_ptr<std::vector<uint8_t>> texpack_take(uint64_t key, const gx
     const double corr = sdo > 1e-6 && sdp > 1e-6 ? cov / std::sqrt(vo * vp) : 0.0;
     uint8_t *px = job->px->data();
     const size_t npx = (size_t)job->w * job->h;
-    static int fixed = 0;
+    static std::atomic<int> fixed{0};
     if (sdo < 6.0) {
         // O PNG tem recorte próprio onde o Vita é opaco (efeitos somados à tela, como o brilho das bolas de fogo
         // da Caixa de Pandora, fireefx): a cor da parte transparente do PNG é lixo (pontos brancos) e, com o alfa
@@ -686,13 +718,13 @@ static std::shared_ptr<std::vector<uint8_t>> texpack_take(uint64_t key, const gx
                     const uint32_t k = std::min<uint32_t>(255u, px[4 * i + 3] * 255u / amax);
                     for (int c = 0; c < 3; c++) px[4 * i + c] = (uint8_t)((px[4 * i + c] * k + 127) / 255);
                 }
-                static int pm = 0;
-                if (pm++ < 8) logf("vitart: pack de texturas: cor de %s multiplicada pelo recorte do PNG", g_texpack[key].c_str());
+                static std::atomic<int> pm{0};
+                if (pm++ < 8) logf("vitart: pack de texturas: cor de %s multiplicada pelo recorte do PNG", tp_path(key).c_str());
             }
         }
         const uint8_t a = (uint8_t)std::lround(std::min(255.0, mo));
         for (size_t i = 0; i < npx; i++) px[4 * i + 3] = a;
-        if (fixed++ < 8) logf("vitart: pack de texturas: alfa de %s = %u (uniforme como no Vita)", g_texpack[key].c_str(), a);
+        if (fixed++ < 8) logf("vitart: pack de texturas: alfa de %s = %u (uniforme como no Vita)", tp_path(key).c_str(), a);
     } else if (sdp < 6.0 || corr < 0.55) {
         const uint32_t ow = info.width, oh = info.height;
         for (uint32_t y = 0; y < job->h; y++) {
@@ -708,16 +740,13 @@ static std::shared_ptr<std::vector<uint8_t>> texpack_take(uint64_t key, const gx
                 px[4 * ((size_t)y * job->w + x) + 3] = (uint8_t)(a + 0.5f);
             }
         }
-        if (fixed++ < 8) logf("vitart: pack de texturas: alfa de %s vindo do Vita (correlação %.2f)", g_texpack[key].c_str(), corr);
+        if (fixed++ < 8) logf("vitart: pack de texturas: alfa de %s vindo do Vita (correlação %.2f)", tp_path(key).c_str(), corr);
     } else if (mp > 0.5 && std::fabs(mo / mp - 1.0) > 0.06) {
         const double k = mo / mp;
         for (size_t i = 3, n = job->px->size(); i < n; i += 4) px[i] = (uint8_t)std::min(255.0, px[i] * k + 0.5);
-        if (fixed++ < 8) logf("vitart: pack de texturas: alfa de %s ajustado ao do Vita (x%.2f)", g_texpack[key].c_str(), k);
+        if (fixed++ < 8) logf("vitart: pack de texturas: alfa de %s ajustado ao do Vita (x%.2f)", tp_path(key).c_str(), k);
     }
-    w = job->w, h = job->h;
-    g_texpack_bytes += job->px->size();
-    if (logged++ < 5) logf("vitart: textura trocada pelo pack (%ux%u -> %ux%u)", info.width, info.height, w, h);
-    return job->px;
+    return true;
 }
 static std::map<std::array<uint32_t, 4>, TexEntry> g_texcache;
 static uint64_t content_hash(const uint8_t *p, size_t n, uint64_t h) {
@@ -1681,9 +1710,9 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
                         if (info.base == 0x95000000u && info.palette) fk = fnv64(ptr<uint8_t>(info.palette), 1024, fk);
                         e.font = fk == kFontKey;
                     }
-                    if (kk) texpack_start(kk), e.tp_key = kk; // ícones de teclado/mouse ou de Xbox
+                    if (kk) texpack_start(kk, px, info.width, info.height), e.tp_key = kk; // ícones de teclado/mouse ou de Xbox
                     else if (ok)
-                        if (const uint64_t k = texpack_key(info, n)) texpack_start(k), e.tp_key = k; // HD em segundo plano
+                        if (const uint64_t k = texpack_key(info, n)) texpack_start(k, px, info.width, info.height), e.tp_key = k; // HD em segundo plano
                     e.mat_key = ok ? pbr::key_for(ptr<uint8_t>(info.data), n, info.width, info.height,
                                                   info.base == 0x95000000u && info.palette ? ptr<uint8_t>(info.palette) : nullptr)
                                    : 0;

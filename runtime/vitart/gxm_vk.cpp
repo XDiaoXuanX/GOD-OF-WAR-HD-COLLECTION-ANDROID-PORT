@@ -12,6 +12,7 @@
 #include "pbr.h"
 #include "trophy_banner.h"
 #include "post_shaders.h"
+#include "present_shaders.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -960,6 +961,11 @@ void set_vsync(bool on, bool fifo) {
 bool is_borderless() { return win::borderless(); }
 
 
+#ifdef __ANDROID__
+static void rp_soltar_imagens();
+static bool rp_montar();
+static bool g_rp_on = false;
+#endif
 // Swapchain do tamanho atual da janela (recriada ao redimensionar, entrar/sair da tela cheia, restaurar).
 static bool create_swapchain() {
     VkSurfaceCapabilitiesKHR caps;
@@ -1048,6 +1054,9 @@ static bool create_swapchain() {
         vt::logf("vitart: swapchain (vez %u) %ux%u, %u imagens, modo de apresentação %d (0 imediato, 1 mailbox, 2 FIFO)", refeitas, g_swap_extent.width,
              g_swap_extent.height, ci.minImageCount, (int)ci.presentMode);
     VkSwapchainKHR sw = VK_NULL_HANDLE;
+#ifdef __ANDROID__
+    if (g_dev) rp_soltar_imagens(); // as vistas apontam para as imagens da swapchain velha
+#endif
     VKC(vkCreateSwapchainKHR(g_dev, &ci, nullptr, &sw));
     if (g_swap) vkDestroySwapchainKHR(g_dev, g_swap, nullptr);
     g_swap = sw;
@@ -1055,14 +1064,190 @@ static bool create_swapchain() {
     vkGetSwapchainImagesKHR(g_dev, g_swap, &ni, nullptr);
     g_swap_images.resize(ni);
     vkGetSwapchainImagesKHR(g_dev, g_swap, &ni, g_swap_images.data());
+#ifdef __ANDROID__
+    {
+        static bool decidiu = false;
+        if (!decidiu) {
+            decidiu = true;
+            VkPhysicalDeviceProperties pp{};
+            vkGetPhysicalDeviceProperties(g_phys, &pp);
+            const char *e = getenv("VITART_PRESENT_RP");
+            g_rp_on = e && *e ? *e == '1' : pp.vendorID == 0x13B5; // Mali (ARM)
+        }
+        rp_montar();
+    }
+#endif
     return true;
 }
 
 
 #ifdef __ANDROID__
+// ------------------------------------------------------------------ present por render pass (Mali)
+// Na Mali a imagem da tela (gralloc, comprimida em AFBC) não aguenta clear/blit/cópia de transferência: a maior parte
+// dos quadros saía preta (sem nem o contador de FPS, que vai no mesmo comando) e só uma das imagens da swapchain
+// mostrava o jogo. Aqui o quadro é montado como antes numa imagem nossa (g_rp_img: barras pretas, blit do jogo, FPS,
+// aviso) e vai para a imagem da tela por um desenho comum num render pass, o caminho que todo driver trata.
+// VITART_PRESENT_RP=1 liga em qualquer GPU; =0 desliga.
+static VkRenderPass g_rp_pass = VK_NULL_HANDLE;
+static VkDescriptorSetLayout g_rp_dsl = VK_NULL_HANDLE;
+static VkPipelineLayout g_rp_layout = VK_NULL_HANDLE;
+static VkPipeline g_rp_pipe = VK_NULL_HANDLE;
+static VkDescriptorPool g_rp_pool = VK_NULL_HANDLE;
+static VkDescriptorSet g_rp_set = VK_NULL_HANDLE;
+static VkSampler g_rp_sampler = VK_NULL_HANDLE;
+static VkFormat g_rp_fmt = VK_FORMAT_UNDEFINED;
+static std::vector<VkImageView> g_rp_views;
+static std::vector<VkFramebuffer> g_rp_fbs;
+static Image g_rp_img;
+
+static void rp_soltar_imagens() {
+    for (VkFramebuffer f : g_rp_fbs) vkDestroyFramebuffer(g_dev, f, nullptr);
+    for (VkImageView v : g_rp_views) vkDestroyImageView(g_dev, v, nullptr);
+    g_rp_fbs.clear(), g_rp_views.clear();
+    destroy(g_rp_img);
+}
+
+static VkShaderModule rp_modulo(const uint32_t *code, size_t words) {
+    VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    ci.codeSize = words * 4, ci.pCode = code;
+    VkShaderModule m = VK_NULL_HANDLE;
+    vkCreateShaderModule(g_dev, &ci, nullptr, &m);
+    return m;
+}
+
+// render pass e pipeline no formato da swapchain (refeitos só se o formato mudar)
+static bool rp_pipeline(VkFormat fmt) {
+    if (g_rp_pipe && g_rp_fmt == fmt) return true;
+    if (g_rp_pipe) vkDestroyPipeline(g_dev, g_rp_pipe, nullptr), g_rp_pipe = VK_NULL_HANDLE;
+    if (g_rp_pass) vkDestroyRenderPass(g_dev, g_rp_pass, nullptr), g_rp_pass = VK_NULL_HANDLE;
+    g_rp_fmt = fmt;
+    VkAttachmentDescription at{};
+    at.format = fmt;
+    at.samples = VK_SAMPLE_COUNT_1_BIT;
+    at.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; // o desenho cobre a tela inteira
+    at.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    at.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, at.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    at.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    at.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    VkAttachmentReference ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription sp{};
+    sp.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    sp.colorAttachmentCount = 1, sp.pColorAttachments = &ref;
+    VkSubpassDependency dep{};
+    dep.srcSubpass = VK_SUBPASS_EXTERNAL, dep.dstSubpass = 0;
+    dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; // a espera do acquire é neste estágio
+    dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dep.srcAccessMask = 0, dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    VkRenderPassCreateInfo rci{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+    rci.attachmentCount = 1, rci.pAttachments = &at, rci.subpassCount = 1, rci.pSubpasses = &sp;
+    rci.dependencyCount = 1, rci.pDependencies = &dep;
+    VKC(vkCreateRenderPass(g_dev, &rci, nullptr, &g_rp_pass));
+    if (!g_rp_dsl) {
+        VkDescriptorSetLayoutBinding b{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+        VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        li.bindingCount = 1, li.pBindings = &b;
+        VKC(vkCreateDescriptorSetLayout(g_dev, &li, nullptr, &g_rp_dsl));
+        VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        pli.setLayoutCount = 1, pli.pSetLayouts = &g_rp_dsl;
+        VKC(vkCreatePipelineLayout(g_dev, &pli, nullptr, &g_rp_layout));
+        VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1};
+        VkDescriptorPoolCreateInfo pci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        pci.maxSets = 1, pci.poolSizeCount = 1, pci.pPoolSizes = &ps;
+        VKC(vkCreateDescriptorPool(g_dev, &pci, nullptr, &g_rp_pool));
+        VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        dai.descriptorPool = g_rp_pool, dai.descriptorSetCount = 1, dai.pSetLayouts = &g_rp_dsl;
+        VKC(vkAllocateDescriptorSets(g_dev, &dai, &g_rp_set));
+        VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+        si.magFilter = si.minFilter = VK_FILTER_NEAREST; // mesmo tamanho da tela: pixel a pixel
+        si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        si.maxLod = 0.f;
+        VKC(vkCreateSampler(g_dev, &si, nullptr, &g_rp_sampler));
+    }
+    VkShaderModule vs = rp_modulo(kPresentVert, sizeof kPresentVert / 4), fs = rp_modulo(kPresentFrag, sizeof kPresentFrag / 4);
+    if (!vs || !fs) return false;
+    VkPipelineShaderStageCreateInfo st[2]{};
+    st[0].sType = st[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    st[0].stage = VK_SHADER_STAGE_VERTEX_BIT, st[0].module = vs, st[0].pName = "main";
+    st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT, st[1].module = fs, st[1].pName = "main";
+    VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineViewportStateCreateInfo vp{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    vp.viewportCount = vp.scissorCount = 1;
+    VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    rs.polygonMode = VK_POLYGON_MODE_FILL, rs.cullMode = VK_CULL_MODE_NONE, rs.lineWidth = 1.f;
+    VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineColorBlendAttachmentState cb{};
+    cb.colorWriteMask = 0xF;
+    VkPipelineColorBlendStateCreateInfo cbs{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    cbs.attachmentCount = 1, cbs.pAttachments = &cb;
+    VkDynamicState dyn[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    ds.dynamicStateCount = 2, ds.pDynamicStates = dyn;
+    VkGraphicsPipelineCreateInfo gp{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    gp.stageCount = 2, gp.pStages = st, gp.pVertexInputState = &vi, gp.pInputAssemblyState = &ia;
+    gp.pViewportState = &vp, gp.pRasterizationState = &rs, gp.pMultisampleState = &ms, gp.pColorBlendState = &cbs;
+    gp.pDynamicState = &ds, gp.layout = g_rp_layout, gp.renderPass = g_rp_pass;
+    const VkResult r = vkCreateGraphicsPipelines(g_dev, VK_NULL_HANDLE, 1, &gp, nullptr, &g_rp_pipe);
+    vkDestroyShaderModule(g_dev, vs, nullptr), vkDestroyShaderModule(g_dev, fs, nullptr);
+    if (r != VK_SUCCESS) return fail("vkCreateGraphicsPipelines(present)", r);
+    return true;
+}
+
+// vistas, framebuffers e a imagem de montagem para a swapchain atual; false = segue pelo blit direto
+static bool rp_montar() {
+    rp_soltar_imagens();
+    if (!g_rp_on || g_swap_images.empty()) return false;
+    if (!rp_pipeline(g_swap_fmt)) return g_rp_on = false;
+    for (VkImage im : g_swap_images) {
+        VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        vi.image = im, vi.viewType = VK_IMAGE_VIEW_TYPE_2D, vi.format = g_swap_fmt;
+        vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        VkImageView v = VK_NULL_HANDLE;
+        if (vkCreateImageView(g_dev, &vi, nullptr, &v) != VK_SUCCESS) return g_rp_on = false;
+        g_rp_views.push_back(v);
+        VkFramebufferCreateInfo fi{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+        fi.renderPass = g_rp_pass, fi.attachmentCount = 1, fi.pAttachments = &v;
+        fi.width = g_swap_extent.width, fi.height = g_swap_extent.height, fi.layers = 1;
+        VkFramebuffer fb = VK_NULL_HANDLE;
+        if (vkCreateFramebuffer(g_dev, &fi, nullptr, &fb) != VK_SUCCESS) return g_rp_on = false;
+        g_rp_fbs.push_back(fb);
+    }
+    if (!make_image(g_rp_img, g_swap_extent.width, g_swap_extent.height, kColor,
+                    VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT))
+        return g_rp_on = false;
+    VkDescriptorImageInfo ii{g_rp_sampler, g_rp_img.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    w.dstSet = g_rp_set, w.dstBinding = 0, w.descriptorCount = 1, w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w.pImageInfo = &ii;
+    vkUpdateDescriptorSets(g_dev, 1, &w, 0, nullptr);
+    static bool avisou = false;
+    if (!avisou) avisou = true, vt::logf("vitart: apresentação por render pass (imagem da tela sem cópias de transferência)");
+    return true;
+}
+
+// a imagem montada vai para a imagem idx da swapchain (o render pass deixa no layout de apresentar)
+static void rp_desenhar(uint32_t idx) {
+    barrier(g_rp_img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    VkRenderPassBeginInfo bi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    bi.renderPass = g_rp_pass, bi.framebuffer = g_rp_fbs[idx];
+    bi.renderArea = {{0, 0}, g_swap_extent};
+    vkCmdBeginRenderPass(g_pcmd, &bi, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBindPipeline(g_pcmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_rp_pipe);
+    VkViewport vp{0.f, 0.f, (float)g_swap_extent.width, (float)g_swap_extent.height, 0.f, 1.f};
+    VkRect2D sc{{0, 0}, g_swap_extent};
+    vkCmdSetViewport(g_pcmd, 0, 1, &vp);
+    vkCmdSetScissor(g_pcmd, 0, 1, &sc);
+    vkCmdBindDescriptorSets(g_pcmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_rp_layout, 0, 1, &g_rp_set, 0, nullptr);
+    vkCmdDraw(g_pcmd, 3, 1, 0, 0);
+    vkCmdEndRenderPass(g_pcmd);
+}
+
 // solta a swapchain e a superfície da janela que o Java vai destruir (ou já trocou)
 static void drop_window() {
     if (g_dev) vkDeviceWaitIdle(g_dev);
+    if (g_dev) rp_soltar_imagens();
     if (g_swap) vkDestroySwapchainKHR(g_dev, g_swap, nullptr);
     if (g_surface) vkDestroySurfaceKHR(g_inst, g_surface, nullptr);
     g_swap = VK_NULL_HANDLE, g_surface = VK_NULL_HANDLE;
@@ -1418,15 +1603,18 @@ bool present(uint32_t addr) {
     dst.img = g_swap_images[idx];
 #ifdef __ANDROID__
     dst.fmt = g_swap_fmt;
+    const bool rp = g_rp_on && g_rp_img.img && idx < g_rp_fbs.size();
+    Image &alvo = rp ? g_rp_img : dst; // com o render pass, o quadro é montado na nossa imagem
 #else
+    Image &alvo = dst;
     dst.fmt = VK_FORMAT_B8G8R8A8_UNORM;
 #endif
     barrier(src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-    barrier(dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    barrier(alvo, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     // Proporção do jogo preservada: a imagem ocupa o maior retângulo centrado; o resto fica preto.
     const VkClearColorValue black{};
     const VkImageSubresourceRange all{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    vkCmdClearColorImage(g_pcmd, dst.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &all);
+    vkCmdClearColorImage(g_pcmd, alvo.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &all);
     const double sw = g_swap_extent.width, sh = g_swap_extent.height, sa = (double)src.w / src.h;
     int32_t dw = (int32_t)sw, dh = (int32_t)(sw / sa + 0.5);
     if (dh > (int32_t)sh) dh = (int32_t)sh, dw = (int32_t)(sh * sa + 0.5);
@@ -1436,16 +1624,24 @@ bool present(uint32_t addr) {
     b.srcOffsets[1] = {(int32_t)src.w, (int32_t)src.h, 1};
     b.dstOffsets[0] = {dx, dy, 0};
     b.dstOffsets[1] = {dx + dw, dy + dh, 1};
-    vkCmdBlitImage(g_pcmd, src.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b,
+    vkCmdBlitImage(g_pcmd, src.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, alvo.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b,
                    VK_FILTER_LINEAR);
     const int32_t margin = (int32_t)(g_swap_extent.height / 60);
-    overlay_fps(dst.img, dx + margin, dy + margin);
-    overlay_banner(dst.img, dx, dy, dw, dh);
+    overlay_fps(alvo.img, dx + margin, dy + margin);
+    overlay_banner(alvo.img, dx, dy, dw, dh);
     if (srcp == &it->second.color) barrier(src, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    barrier(dst, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+#ifdef __ANDROID__
+    if (rp) rp_desenhar(idx);
+    else
+#endif
+        barrier(dst, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     g_cur = g_cmd;
     VKC(vkEndCommandBuffer(g_pcmd));
+#ifdef __ANDROID__
+    const VkPipelineStageFlags stage = rp ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT : VK_PIPELINE_STAGE_TRANSFER_BIT;
+#else
     const VkPipelineStageFlags stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+#endif
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.waitSemaphoreCount = 1;
     si.pWaitSemaphores = &g_acquired;

@@ -13,6 +13,7 @@
 #include <string>
 #include <cstdint>
 #include <vector>
+#include <memory>
 
 namespace gvk {
 
@@ -88,6 +89,9 @@ struct Draw {
     // posição pela profundidade; vale em qualquer desenho 3D, com ou sem PBR.
     bool view_inv_ok = false;
     float view_inv[16] = {};
+    // Donos do que os ponteiros acima apontam fora da memória do jogo (SPIR-V e pixels das texturas): com a gravação
+    // num thread próprio (gxm_backend.cpp), o desenho é gravado depois de o HLE seguir adiante
+    std::vector<std::shared_ptr<const void>> keep;
 
 };
 

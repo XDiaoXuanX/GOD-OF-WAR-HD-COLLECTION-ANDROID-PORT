@@ -1817,6 +1817,10 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
     ultrawide(d, vp->program, c.vuniform, c.vuniform ? vsize : 0, uw_uniforms, text_copy);
     const uint64_t tg = now_ns();
     g_t_tex += tg - t_tex0;
+    d.keep.reserve(keep.size() + 2);
+    for (auto &k : keep) d.keep.push_back(k);
+    d.keep.push_back(vs), d.keep.push_back(d.fs == fs->data() ? fs : nullptr);
+    if (d.pbr) d.keep.push_back(spv_pbr_of(fp->program));
     const bool drew = gvk::draw(d);
     g_t_gvk += now_ns() - tg;
     d.raw_streams.swap(raw_streams), d.raw_attrs.swap(raw_attrs), d.textures.swap(tex_tls); // a capacidade volta ao rascunho

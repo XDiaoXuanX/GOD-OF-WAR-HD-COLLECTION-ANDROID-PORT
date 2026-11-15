@@ -349,6 +349,7 @@ static void texpack_load() {
         std::string line;
         size_t n = 0;
         while (std::getline(f, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back(); // CRLF (ver os ícones abaixo)
             const size_t tab = line.find('\t');
             if (tab == std::string::npos) continue;
             g_texpack[std::strtoull(line.substr(0, tab).c_str(), nullptr, 16)] = (dir.path() / line.substr(tab + 1)).string();
@@ -388,6 +389,9 @@ static void texpack_load() {
             std::string line;
             size_t n = 0;
             while (std::getline(f, line)) {
+                // index.tsv gravado no Windows (CRLF): sem tirar o \r o nome virava "font_ps5.png\r" e o Android não
+                // achava o arquivo (errno 2) -- os ícones do PS5/Xbox/teclado/Switch saíam em branco nos dois jogos
+                if (!line.empty() && line.back() == '\r') line.pop_back();
                 const size_t tab = line.find('\t');
                 if (tab == std::string::npos || line[0] == '#') continue;
                 g_texkbm[std::strtoull(line.substr(0, tab).c_str(), nullptr, 16) ^ salt] = (dir.path() / line.substr(tab + 1)).string();

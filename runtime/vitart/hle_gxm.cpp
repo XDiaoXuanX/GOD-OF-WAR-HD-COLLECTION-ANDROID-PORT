@@ -919,6 +919,22 @@ static uint32_t attr_size(uint32_t fmt) { return fmt <= 1 || fmt == 4 || fmt == 
 // Deck) busca do endereço arredondado e o vértice vira lixo: cores de arco-íris por triângulo na geometria
 // iluminada (captura F9 de uma RX 9070 XT, quadro 27790: 610 de 675 desenhos). Os streams com atributo
 // desalinhado são copiados para um layout alinhado a 4 bytes (só os atributos usados, na mesma ordem).
+// hash rápido de um trecho de memória (8 bytes por vez): conferir se o vértice mudou
+static uint64_t hash_rapido(const uint8_t *p, size_t n) {
+    uint64_t h = 0x9E3779B97F4A7C15ull ^ n;
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        uint64_t w;
+        std::memcpy(&w, p + i, 8);
+        h = (h ^ w) * 0xff51afd7ed558ccdull;
+        h ^= h >> 32;
+    }
+    uint64_t w = 0;
+    std::memcpy(&w, p + i, n - i);
+    h = (h ^ w) * 0xc4ceb9fe1a85ec53ull;
+    return h ^ (h >> 29);
+}
+
 // O "1" do quarto componente em cada formato (o que o Vulkan põe no w quando o formato tem 3 componentes)
 static void attr_one(uint8_t *p, uint32_t fmt) {
     switch (fmt) {
@@ -940,6 +956,15 @@ static void attr_one(uint8_t *p, uint32_t fmt) {
 static void realign_streams(std::vector<gvk::VertexStream> &streams, std::vector<gvk::VertexAttr> &attrs, uint32_t nv,
                             std::vector<std::vector<uint8_t>> &store, const std::vector<uint8_t> *expand = nullptr) {
     static const bool off = getenv("VITART_VK_NO_REALIGN") != nullptr; // comparação: o layout cru como antes
+    struct Realinhado {
+        uint64_t h = 0;
+        std::vector<uint8_t> out;
+    };
+    static thread_local std::unordered_map<uint64_t, Realinhado> cache;
+    static thread_local size_t cache_bytes = 0;
+    // teto de memória: esvazia antes de olhar os streams deste desenho (nenhum ponteiro dele aponta para o cache ainda;
+    // os desenhos anteriores já foram copiados para o anel pelo gvk::draw)
+    if (cache_bytes > (96u << 20) || cache.size() > 20000) cache.clear(), cache_bytes = 0;
     for (uint32_t b = 0; b < streams.size(); b++) {
         gvk::VertexStream &st = streams[b];
         bool bad = false, alarga = false;
@@ -977,7 +1002,32 @@ static void realign_streams(std::vector<gvk::VertexStream> &streams, std::vector
             cur = (cur + bytes[i] + 3) & ~3u;
         }
         const uint32_t ns = cur ? cur : 4;
-        std::vector<uint8_t> &dst = store.emplace_back((size_t)nv * ns, 0);
+        // Cache por conteúdo: as malhas do GoW (vértices de 11 e 19 bytes) são as mesmas quadro após quadro, e
+        // copiar cada vértice atributo por atributo em todo desenho custava 4 a 10 ms por quadro numa Adreno 619.
+        // Conferir o conteúdo (hash rápido do trecho de origem) é várias vezes mais barato que refazer a cópia.
+        static const bool sem_cache = getenv("VITART_VK_NO_REALIGN_CACHE") != nullptr;
+        uint64_t chave = ((uint64_t)(uintptr_t)st.data * 0x9E3779B97F4A7C15ull) ^ ((uint64_t)st.stride << 1) ^ ((uint64_t)nv << 20) ^
+                         ((uint64_t)ns << 48);
+        for (size_t i = 0; i < mine.size(); i++)
+            chave = (chave ^ (old_off[i] | (uint64_t)copia[i] << 12 | (uint64_t)exp_mine[i] << 24 | (uint64_t)mine[i]->offset << 32 |
+                              (uint64_t)mine[i]->fmt << 48)) * 1099511628211ull;
+        const uint64_t hs = sem_cache ? 0 : hash_rapido(st.data, st.size);
+        if (!sem_cache) {
+            auto it = cache.find(chave);
+            if (it != cache.end() && it->second.h == hs && it->second.out.size() == (size_t)nv * ns) {
+                st.data = it->second.out.data();
+                st.stride = ns;
+                st.size = (uint32_t)it->second.out.size();
+                continue;
+            }
+        }
+        std::vector<uint8_t> &dst = sem_cache ? store.emplace_back((size_t)nv * ns, 0) : cache[chave].out;
+        if (!sem_cache) {
+            cache_bytes -= std::min(cache_bytes, dst.size());
+            dst.assign((size_t)nv * ns, 0);
+            cache_bytes += dst.size();
+            cache[chave].h = hs;
+        }
         for (uint32_t v = 0; v < nv; v++) {
             const uint8_t *src = st.data + (size_t)v * st.stride;
             uint8_t *out = dst.data() + (size_t)v * ns;

@@ -41,16 +41,67 @@ constexpr uint32_t SCE_ERROR_ERRNO_ENOENT = 0x80010002u;
 constexpr uint32_t SCE_ERROR_ERRNO_EBADF = 0x80010009u;
 constexpr uint32_t SCE_ERROR_ERRNO_EEXIST = 0x80010011u;
 
+// Arquivo do jogo (app0) com o nome em qualquer caixa. O Vita e o Windows não diferenciam maiúsculas, e o GoW pede
+// "a01mp05.bk2" quando o PKG traz "a01Mp05.bk2": no armazenamento de vários Android (que diferencia) o vídeo não
+// abria e o jogo ficava esperando por ele (o alçapão do barco do GoW1 não abria). Só quando o caminho exato não
+// existe: cada parte é procurada na pasta sem olhar a caixa; o resultado (achado ou não) fica em cache, já que app0
+// não muda com o jogo rodando.
+static std::string app_case_path(const std::string &rest) {
+    const std::string exato = app_path() + "/" + rest;
+#ifdef _WIN32
+    return exato;
+#else
+    std::error_code ec;
+    if (fs::exists(exato, ec)) return exato;
+    static std::mutex m;
+    static std::unordered_map<std::string, std::string> cache;
+    const std::lock_guard<std::mutex> lock(m);
+    if (auto it = cache.find(rest); it != cache.end()) return it->second;
+    auto igual = [](const std::string &a, const std::string &b) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); i++)
+            if (std::tolower((unsigned char)a[i]) != std::tolower((unsigned char)b[i])) return false;
+        return true;
+    };
+    std::string cur = app_path(), resto = rest;
+    for (char &c : resto)
+        if (c == '\\') c = '/';
+    bool achou = true;
+    size_t i = 0;
+    while (i <= resto.size()) {
+        size_t j = resto.find('/', i);
+        if (j == std::string::npos) j = resto.size();
+        const std::string parte = resto.substr(i, j - i);
+        i = j + 1;
+        if (parte.empty() || parte == ".") continue; // "exec///_movies"
+        std::string prox = cur + "/" + parte;
+        if (!fs::exists(prox, ec)) {
+            bool ok = false;
+            for (auto &d : fs::directory_iterator(cur, ec))
+                if (igual(d.path().filename().string(), parte)) {
+                    prox = d.path().string();
+                    ok = true;
+                    break;
+                }
+            if (!ok) { achou = false; break; }
+        }
+        cur = prox;
+    }
+    const std::string r = achou ? cur : exato;
+    if (achou) logf("vitart: %s aberto como %s (nome em outra caixa)", rest.c_str(), r.c_str());
+    cache.emplace(rest, r);
+    return r;
+#endif
+}
+
 static std::string host_path(const std::string &p) {
     const size_t colon = p.find(':');
     std::string dev = colon == std::string::npos ? "" : p.substr(0, colon);
     std::string rest = colon == std::string::npos ? p : p.substr(colon + 1);
     while (!rest.empty() && (rest[0] == '/' || rest[0] == '\\'))
         rest.erase(0, 1);
-    if (dev == "app0")
-        return app_path() + "/" + rest;
-    if (dev.empty())
-        return app_path() + "/" + rest;
+    if (dev == "app0" || dev.empty())
+        return app_case_path(rest);
     return data_path() + "/" + dev + "/" + rest;
 }
 

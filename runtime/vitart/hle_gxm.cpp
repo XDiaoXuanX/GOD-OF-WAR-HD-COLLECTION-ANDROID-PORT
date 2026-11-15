@@ -33,6 +33,10 @@
 #include <thread>
 #include <tuple>
 #include <unordered_map>
+#ifdef __ANDROID__
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 namespace vt {
 std::string mods_dir_for(const std::string &psarc_name); // hle_io.cpp: pasta dos mods
@@ -756,6 +760,9 @@ static uint64_t now_ns() {
     return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+#ifdef __ANDROID__
+static void pacote_iniciar(const std::string &dir); // pacote dos shaders (mais abaixo)
+#endif
 static bool vk_on() {
     if (g_vk < 0) {
         const char *e = getenv("VITART_VULKAN");
@@ -771,6 +778,9 @@ static bool vk_on() {
             } else {
                 g_shader_ext = gvk::backend() == gvk::Backend::d3d11 ? ".dx11" : ".spv";
                 logf("vitart: renderizador %s ligado (shaders em %s)", gvk::backend_name(), g_spv_dir.c_str());
+#ifdef __ANDROID__
+                pacote_iniciar(g_spv_dir);
+#endif
             }
         }
     }
@@ -787,7 +797,112 @@ static std::string spv_name(uint32_t prog) {
     std::snprintf(name, sizeof name, "%016llx", (unsigned long long)h);
     return name;
 }
+#ifdef __ANDROID__
+// Pacote dos shaders (<shaders>/_pacote.bin): no armazenamento do Android cada arquivo aberto passa pelo FUSE e
+// custa milissegundos; abrir um .spv por programa no registro travava o carregamento do GOWShader por 9 s (Adreno
+// 732) a 39 s (PowerVR GE8320, e o jogo abortava logo depois, com o áudio fora do tempo). O pacote junta os ~9.800
+// .spv num arquivo só (índice + conteúdo), montado uma vez numa thread de fundo; depois, um open só e pread.
+// Formato: "VTSP1\0\0\0", u32 n, u64 bytes da pasta (conferência), n x {u64 hash, u64 offset, u32 tamanho}, dados.
+static std::atomic<bool> g_pacote_pronto{false};
+static int g_pacote_fd = -1;
+static std::unordered_map<uint64_t, std::pair<uint64_t, uint32_t>> g_pacote_idx;
+static bool pacote_carregar(const std::string &arq, uint32_t n_esperado, uint64_t bytes_esperados) {
+    const int fd = ::open(arq.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    char cab[20];
+    uint32_t n = 0;
+    uint64_t bytes = 0;
+    if (::pread(fd, cab, 20, 0) != 20 || std::memcmp(cab, "VTSP1\0\0\0", 8) != 0) { ::close(fd); return false; }
+    std::memcpy(&n, cab + 8, 4), std::memcpy(&bytes, cab + 12, 8);
+    if (n != n_esperado || bytes != bytes_esperados) { ::close(fd); return false; }
+    std::vector<uint8_t> idx((size_t)n * 20);
+    if (::pread(fd, idx.data(), idx.size(), 20) != (ssize_t)idx.size()) { ::close(fd); return false; }
+    std::unordered_map<uint64_t, std::pair<uint64_t, uint32_t>> m;
+    m.reserve(n);
+    for (uint32_t i = 0; i < n; i++) {
+        uint64_t h, off;
+        uint32_t len;
+        std::memcpy(&h, &idx[(size_t)i * 20], 8), std::memcpy(&off, &idx[(size_t)i * 20 + 8], 8), std::memcpy(&len, &idx[(size_t)i * 20 + 16], 4);
+        m[h] = {off, len};
+    }
+    g_pacote_idx.swap(m);
+    g_pacote_fd = fd;
+    g_pacote_pronto = true;
+    return true;
+}
+static void pacote_iniciar(const std::string &dir) {
+    if (getenv("VITART_SEM_PACOTE_SHADERS")) return;
+    std::thread([dir] {
+        const uint64_t t0 = now_ns();
+        std::vector<std::pair<uint64_t, std::string>> arqs;
+        uint64_t bytes = 0;
+        std::error_code ec;
+        for (auto &e : std::filesystem::directory_iterator(dir, ec)) {
+            const std::string nome = e.path().filename().string();
+            if (nome.size() != 20 || nome.compare(16, 4, ".spv") != 0) continue; // <16 hex>.spv (sem as variantes .pbr)
+            char *fim = nullptr;
+            const uint64_t h = std::strtoull(nome.substr(0, 16).c_str(), &fim, 16);
+            arqs.push_back({h, e.path().string()});
+            bytes += e.file_size(ec);
+        }
+        if (arqs.empty()) return;
+        std::sort(arqs.begin(), arqs.end());
+        const std::string arq = dir + "/_pacote.bin";
+        if (pacote_carregar(arq, (uint32_t)arqs.size(), bytes)) {
+            logf("vitart: shaders pelo pacote (%zu, %.0f MB)", arqs.size(), bytes / 1048576.0);
+            return;
+        }
+        // monta (uma vez; refaz se a pasta mudar): escreve num temporário e renomeia no fim
+        const std::string tmp = arq + ".tmp";
+        FILE *o = std::fopen(tmp.c_str(), "wb");
+        if (!o) return;
+        const uint32_t n = (uint32_t)arqs.size();
+        std::vector<uint8_t> idx((size_t)n * 20);
+        std::fwrite("VTSP1\0\0\0", 1, 8, o);
+        std::fwrite(&n, 4, 1, o);
+        std::fwrite(&bytes, 8, 1, o);
+        std::fwrite(idx.data(), 1, idx.size(), o);
+        uint64_t off = 20 + idx.size();
+        std::vector<char> buf;
+        bool ok = true;
+        for (uint32_t i = 0; i < n && ok; i++) {
+            std::ifstream f(arqs[i].second, std::ios::binary);
+            buf.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+            const uint32_t len = (uint32_t)buf.size();
+            std::memcpy(&idx[(size_t)i * 20], &arqs[i].first, 8), std::memcpy(&idx[(size_t)i * 20 + 8], &off, 8);
+            std::memcpy(&idx[(size_t)i * 20 + 16], &len, 4);
+            ok = std::fwrite(buf.data(), 1, len, o) == len;
+            off += len;
+        }
+        ok = ok && std::fseek(o, 20, SEEK_SET) == 0 && std::fwrite(idx.data(), 1, idx.size(), o) == idx.size();
+        ok = std::fclose(o) == 0 && ok;
+        if (!ok) { std::remove(tmp.c_str()); return; }
+        std::remove(arq.c_str());
+        if (std::rename(tmp.c_str(), arq.c_str()) != 0) return;
+        if (pacote_carregar(arq, n, bytes))
+            logf("vitart: pacote de shaders montado: %u em %.1f s (%.0f MB)", n, (now_ns() - t0) / 1e9, bytes / 1048576.0);
+    }).detach();
+}
+static std::shared_ptr<std::vector<uint32_t>> pacote_ler(const std::string &nome) {
+    if (!g_pacote_pronto || nome.size() < 16) return nullptr;
+    const uint64_t h = std::strtoull(nome.substr(0, 16).c_str(), nullptr, 16);
+    auto it = g_pacote_idx.find(h);
+    if (it == g_pacote_idx.end() || it->second.second < 20) return nullptr;
+    auto code = std::make_shared<std::vector<uint32_t>>(it->second.second / 4);
+    if (::pread(g_pacote_fd, code->data(), code->size() * 4, (off_t)it->second.first) != (ssize_t)(code->size() * 4)) return nullptr;
+    return code;
+}
+#endif
+
 static std::shared_ptr<std::vector<uint32_t>> spv_read(const std::string &path) {
+#ifdef __ANDROID__
+    {   // <dir>/<hash>.spv: do pacote, se já está pronto
+        const size_t barra = path.find_last_of('/');
+        const std::string nome = barra == std::string::npos ? path : path.substr(barra + 1);
+        if (nome.size() == 20 && nome.compare(16, 4, ".spv") == 0)
+            if (auto c = pacote_ler(nome)) return c;
+    }
+#endif
     std::ifstream f(path, std::ios::binary);
     if (!f) return nullptr;
     std::vector<char> raw((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
@@ -1990,7 +2105,12 @@ VT_HLE(sceGxmShaderPatcherRegisterProgram) {
     if (fresh && vk_on()) {
         const std::lock_guard<std::mutex> lock(g_vk_mutex);
         g_spv.erase(prog); // endereço reaproveitado por outro programa
-        spv_of(prog);
+#ifdef __ANDROID__
+        // sem o pacote ainda (primeira abertura, ele está sendo montado): fica para o 1º desenho, em vez de abrir
+        // milhares de arquivos aqui e travar o carregamento da fase
+        if (g_pacote_pronto)
+#endif
+            spv_of(prog);
     }
     ret(ctx, SCE_OK);
 }

@@ -1745,7 +1745,14 @@ bool init(bool validation, bool window) {
         VkPhysicalDeviceProperties pp;
         vkGetPhysicalDeviceProperties(g_phys, &pp);
         const char *e = getenv("VITART_VK_ANISO");
+#ifdef __ANDROID__
+        // celular: sem anisotrópico por padrão. Em 16x cada amostra de textura com mipmap lê até 16 vezes mais, e
+        // numa GPU de celular (banda de memória dividida com o processador) isso derrubava o FPS em 2x; o Vita e o
+        // emulador também não filtram assim. VITART_VK_ANISO=<n> liga.
+        const float want = e ? (float)std::atof(e) : 1.f;
+#else
         const float want = e ? (float)std::atof(e) : 16.f;
+#endif
         if (have.samplerAnisotropy && want > 1.f) {
             feats.samplerAnisotropy = VK_TRUE;
             g_aniso = std::min(want, pp.limits.maxSamplerAnisotropy);
@@ -1761,7 +1768,10 @@ bool init(bool validation, bool window) {
     vkGetDeviceQueue(g_dev, g_qfam, 0, &g_queue);
     {   // profundidade com stencil que sirva de anexo e de amostra (o GXM lê a profundidade como textura)
         const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
-        for (VkFormat f : {VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT}) {
+        // VITART_DEPTH=24 (teste de desempenho): D24S8 primeiro, metade da banda de profundidade num tiler
+        static const bool d24 = getenv("VITART_DEPTH") && std::atoi(getenv("VITART_DEPTH")) == 24;
+        for (VkFormat f : d24 ? std::initializer_list<VkFormat>{VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_D32_SFLOAT_S8_UINT}
+                              : std::initializer_list<VkFormat>{VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT}) {
             VkFormatProperties fp;
             vkGetPhysicalDeviceFormatProperties(g_phys, f, &fp);
             if ((fp.optimalTilingFeatures & need) == need) {

@@ -257,6 +257,9 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         try {
             GpuInfo g = GpuInfo.detectar(this);
             if ((g.familia.mali() || g.familia == GpuInfo.Familia.POWERVR) && (lado == 0 || lado > 2048)) lado = 2048;
+            // Adreno 6xx e as 7xx de entrada (Snapdragon 8xx antigos, 7 Gen 1...): banda de memória menor que a dos
+            // tops atuais; as texturas HD de 4096 px pesavam no FPS em 2x
+            if ((g.familia == GpuInfo.Familia.A6XX || g.familia == GpuInfo.Familia.A7XX_BAIXO) && (lado == 0 || lado > 2048)) lado = 2048;
         } catch (Exception ignorada) {
             // GPU desconhecida: fica o da RAM
         }

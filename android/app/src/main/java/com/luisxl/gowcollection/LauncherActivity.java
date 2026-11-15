@@ -40,12 +40,16 @@ public final class LauncherActivity extends Activity {
             URL_GITHUB = "https://github.com/luisxl15";
     private static boolean aberturaMostrada; // a abertura sai uma vez por vida do processo (voltar do jogo não repete)
     private Tela tela;
+    // a tela da LauncherActivity que está aberta agora: a instalação (vários minutos) pode terminar depois de o
+    // Android recriar a activity, e o aviso de pronto tem de chegar à tela nova, não à antiga
+    static volatile Tela telaAtual;
 
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
         Pastas.carregar(this);
         tela = new Tela(this);
+        telaAtual = tela;
         if (Build.VERSION.SDK_INT >= 29) tela.setForceDarkAllowed(false); // o modo escuro da One UI clareava o preto
         setContentView(tela);
         telaCheia();
@@ -255,7 +259,7 @@ public final class LauncherActivity extends Activity {
         private File raiz;
         private final Bitmap[] heroi = new Bitmap[3], cartao = new Bitmap[3];
         private Bitmap logo, sombraLogo;
-        private boolean artesLidas;
+        private boolean artesLidas, artesDaPasta; // artesDaPasta: lidas com a pasta do jogo completa
         // fundo: as artes trocam a cada CICLO s com fade cruzado de FADE s; escolher um jogo põe a dele na hora
         private static final float CICLO = 5f, FADE = 1.2f;
         private int fundo = 0, fundoAntes = -1;
@@ -336,7 +340,7 @@ public final class LauncherActivity extends Activity {
             if (acesso) {
                 if (Drivers.importarDaPasta(act, raiz) > 0)
                     Toast.makeText(act, Tr.t("Drivers novos da pasta drivers instalados"), Toast.LENGTH_SHORT).show();
-                if (!artesLidas) lerArtes();
+                if (!artesLidas || (falta == null && !artesDaPasta)) lerArtes();
             }
             if (Drivers.MODO_AUTO.equals(Drivers.modo(act))) rodarAuto(false); // como o checkOnOpen do DroidDeck
             if (drivers) montarDrivers();
@@ -345,6 +349,7 @@ public final class LauncherActivity extends Activity {
 
         private void lerArtes() {
             artesLidas = true;
+            artesDaPasta = falta == null;
             File ui = new File(raiz, "data/ui-arte"), sys = new File(Pastas.jogo(raiz), "sce_sys");
             int larg = Math.max(1280, getResources().getDisplayMetrics().widthPixels);
             Bitmap chave = abrir(new File(ui, "chave.jpg"), larg);
@@ -2129,6 +2134,7 @@ public final class LauncherActivity extends Activity {
             erroInst = null;
             final File pkg = pkgEscolhido, rif = rifEscolhido, raizI = destinoInstalacao();
             final boolean tex = querTexturas;
+            act.getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON); // a tela não apaga no meio
             new Thread(() -> {
                 Instalador.Aviso av = (e, f, t) -> { etapaInst = e; feitoInst = f; totalInst = t; postInvalidate(); };
                 Instalador.Cancelar cn = () -> { if (cancelarInst) throw new Instalador.Erro(Tr.t("Cancelado")); };
@@ -2163,17 +2169,25 @@ public final class LauncherActivity extends Activity {
                     Opcoes.gravar(raizI, "resolution", "1"); // celular: começa na resolução do Vita (1x); o menu do jogo muda
                     if (rel != null) act.getSharedPreferences("atualizacao", android.content.Context.MODE_PRIVATE).edit().putString("dados", rel.tag).apply();
                     Atualizador.apagar(trabalho);
-                    post(() -> {
+                    new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
                         instalar = false;
                         Pastas.guardar(act, raizI.getPath());
-                        conferir();
-                        Toast.makeText(act, Tr.t("Jogo instalado"), Toast.LENGTH_LONG).show();
+                        Tela t = telaAtual != null ? telaAtual : this;
+                        t.instalar = false;
+                        t.artesLidas = false; // as artes da pasta nova (antes não havia pasta)
+                        t.conferir();
+                        Toast.makeText(t.act, Tr.t("Jogo instalado"), Toast.LENGTH_LONG).show();
                     });
                 } catch (Exception e) {
                     erroInst = e.getMessage() != null ? e.getMessage() : e.toString();
                 } finally {
                     rodandoInst = false;
                     etapaInst = null;
+                    new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+                        Tela t = telaAtual != null ? telaAtual : this;
+                        t.act.getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                        t.invalidate();
+                    });
                     postInvalidate();
                 }
             }, "instalar").start();

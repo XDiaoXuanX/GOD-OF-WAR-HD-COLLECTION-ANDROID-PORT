@@ -915,27 +915,60 @@ static uint32_t attr_size(uint32_t fmt) { return fmt <= 1 || fmt == 4 || fmt == 
 // Deck) busca do endereço arredondado e o vértice vira lixo: cores de arco-íris por triângulo na geometria
 // iluminada (captura F9 de uma RX 9070 XT, quadro 27790: 610 de 675 desenhos). Os streams com atributo
 // desalinhado são copiados para um layout alinhado a 4 bytes (só os atributos usados, na mesma ordem).
+// O "1" do quarto componente em cada formato (o que o Vulkan põe no w quando o formato tem 3 componentes)
+static void attr_one(uint8_t *p, uint32_t fmt) {
+    switch (fmt) {
+    case 0: case 1: p[0] = 1; break;
+    case 2: case 3: { const uint16_t v = 1; std::memcpy(p, &v, 2); break; }
+    case 4: p[0] = 255; break;
+    case 5: p[0] = 127; break;
+    case 6: { const uint16_t v = 65535; std::memcpy(p, &v, 2); break; }
+    case 7: { const uint16_t v = 32767; std::memcpy(p, &v, 2); break; }
+    case 8: { const uint16_t v = 0x3C00; std::memcpy(p, &v, 2); break; }
+    case 9: { const float v = 1.f; std::memcpy(p, &v, 4); break; }
+    default: break;
+    }
+}
+
+// expand (por atributo, na ordem de attrs): formato de 3 componentes que a GPU não lê como vértice (o driver da
+// Qualcomm não tem R8G8B8/R16G16B16) vai com 4, o quarto = 1. Antes, um atributo assim mandava o desenho inteiro
+// para a conversão em float na CPU (4 a 10 ms por quadro numa Adreno 619).
 static void realign_streams(std::vector<gvk::VertexStream> &streams, std::vector<gvk::VertexAttr> &attrs, uint32_t nv,
-                            std::vector<std::vector<uint8_t>> &store) {
+                            std::vector<std::vector<uint8_t>> &store, const std::vector<uint8_t> *expand = nullptr) {
     static const bool off = getenv("VITART_VK_NO_REALIGN") != nullptr; // comparação: o layout cru como antes
-    if (off) return;
     for (uint32_t b = 0; b < streams.size(); b++) {
         gvk::VertexStream &st = streams[b];
-        bool bad = false;
+        bool bad = false, alarga = false;
         std::vector<gvk::VertexAttr *> mine;
-        for (gvk::VertexAttr &a : attrs)
-            if (a.stream == b) {
-                mine.push_back(&a);
-                const uint32_t cs = attr_size(a.fmt);
-                if (a.offset % cs || st.stride % cs) bad = true;
-            }
-        if (!bad || mine.empty()) continue;
-        std::sort(mine.begin(), mine.end(), [](const gvk::VertexAttr *x, const gvk::VertexAttr *y) { return x->offset < y->offset; });
-        std::vector<uint32_t> old_off(mine.size()), bytes(mine.size());
+        std::vector<uint8_t> exp_mine;
+        for (size_t ai = 0; ai < attrs.size(); ai++) {
+            gvk::VertexAttr &a = attrs[ai];
+            if (a.stream != b) continue;
+            mine.push_back(&a);
+            const uint8_t e = expand && ai < expand->size() ? (*expand)[ai] : 0;
+            exp_mine.push_back(e);
+            if (e) alarga = true;
+            const uint32_t cs = attr_size(a.fmt);
+            if (a.offset % cs || st.stride % cs) bad = true;
+        }
+        if (off && !alarga) continue;
+        if ((!bad && !alarga) || mine.empty()) continue;
+        {   // em ordem de offset, levando junto a marca de alargar
+            std::vector<size_t> ord(mine.size());
+            for (size_t i = 0; i < ord.size(); i++) ord[i] = i;
+            std::sort(ord.begin(), ord.end(), [&](size_t x, size_t y) { return mine[x]->offset < mine[y]->offset; });
+            std::vector<gvk::VertexAttr *> m2;
+            std::vector<uint8_t> e2;
+            for (size_t i : ord) m2.push_back(mine[i]), e2.push_back(exp_mine[i]);
+            mine.swap(m2), exp_mine.swap(e2);
+        }
+        std::vector<uint32_t> old_off(mine.size()), bytes(mine.size()), copia(mine.size());
         uint32_t cur = 0;
         for (size_t i = 0; i < mine.size(); i++) {
             old_off[i] = mine[i]->offset;
-            bytes[i] = attr_size(mine[i]->fmt) * mine[i]->comps;
+            const uint32_t cs = attr_size(mine[i]->fmt);
+            bytes[i] = cs * mine[i]->comps;             // no layout novo (4 componentes se alargado)
+            copia[i] = exp_mine[i] ? cs * 3 : bytes[i]; // o que vem do vértice original
             mine[i]->offset = cur;
             cur = (cur + bytes[i] + 3) & ~3u;
         }
@@ -944,7 +977,10 @@ static void realign_streams(std::vector<gvk::VertexStream> &streams, std::vector
         for (uint32_t v = 0; v < nv; v++) {
             const uint8_t *src = st.data + (size_t)v * st.stride;
             uint8_t *out = dst.data() + (size_t)v * ns;
-            for (size_t i = 0; i < mine.size(); i++) std::memcpy(out + mine[i]->offset, src + old_off[i], bytes[i]);
+            for (size_t i = 0; i < mine.size(); i++) {
+                std::memcpy(out + mine[i]->offset, src + old_off[i], copia[i]);
+                if (exp_mine[i]) attr_one(out + mine[i]->offset + copia[i], mine[i]->fmt);
+            }
         }
         static bool avisou = false;
         if (!avisou) {
@@ -1270,6 +1306,8 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
         bool ok = !no_raw && !locs.empty();
         int binding_of[16];
         uint32_t end_of[16] = {};
+        static thread_local std::vector<uint8_t> alargar;
+        alargar.clear();
         std::fill(std::begin(binding_of), std::end(binding_of), -1);
         for (size_t k = 0; ok && k < locs.size(); k++) {
             bool found = false;
@@ -1277,8 +1315,14 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
                 const uint8_t *d = &vp->attributes[8 * a];
                 const uint32_t st = d[0] | (d[1] << 8), off = d[2] | (d[3] << 8), fmt = d[4], comps = d[5], reg = d[6] | (d[7] << 8);
                 if (reg != locs[k] || st >= 16 || !c.streams[st]) continue;
-                const uint32_t nc = comps < 4 ? comps : 4;
-                if (!gvk::vertex_format_ok(fmt, nc)) break;
+                uint32_t nc = comps < 4 ? comps : 4;
+                uint8_t alarga = 0;
+                static const bool forca3 = getenv("VITART_VK_FORCE_EXPAND3") != nullptr; // teste do alargar numa GPU que lê 3
+                if (!gvk::vertex_format_ok(fmt, nc) || (forca3 && nc == 3 && fmt != 9)) {
+                    static const bool sem_alargar = getenv("VITART_VK_NO_EXPAND3") != nullptr;
+                    if (nc != 3 || sem_alargar || !gvk::vertex_format_ok(fmt, 4)) break;
+                    alarga = 1; // 3 componentes sem suporte: vai como 4, com o quarto = 1 (realign_streams)
+                }
                 if (binding_of[st] < 0) {
                     binding_of[st] = (int)raw_streams.size();
                     gvk::VertexStream vs_;
@@ -1286,10 +1330,11 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
                     vs_.data = ptr<uint8_t>(c.streams[st] + mini * vs_.stride);
                     raw_streams.push_back(vs_);
                 }
-                end_of[st] = std::max(end_of[st], off + attr_size(fmt) * nc);
+                end_of[st] = std::max(end_of[st], off + attr_size(fmt) * (alarga ? 3 : nc));
                 gvk::VertexAttr va;
-                va.location = (uint32_t)k, va.stream = (uint32_t)binding_of[st], va.offset = off, va.fmt = fmt, va.comps = nc;
+                va.location = (uint32_t)k, va.stream = (uint32_t)binding_of[st], va.offset = off, va.fmt = fmt, va.comps = alarga ? 4 : nc;
                 raw_attrs.push_back(va);
+                alargar.push_back(alarga);
                 found = true;
                 break;
             }
@@ -1301,7 +1346,12 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
                     gvk::VertexStream &vs_ = raw_streams[binding_of[st]];
                     vs_.size = (nv - 1) * vs_.stride + end_of[st];
                 }
-            realign_streams(raw_streams, raw_attrs, nv, realigned);
+            realign_streams(raw_streams, raw_attrs, nv, realigned, &alargar);
+            static bool avisou = false;
+            if (!avisou && std::find(alargar.begin(), alargar.end(), (uint8_t)1) != alargar.end()) {
+                avisou = true;
+                logf("vitart: atributos de 3 componentes sem suporte na GPU vão com 4 (sem a conversão em float na CPU)");
+            }
         } else {
             raw_streams.clear(), raw_attrs.clear();
         }

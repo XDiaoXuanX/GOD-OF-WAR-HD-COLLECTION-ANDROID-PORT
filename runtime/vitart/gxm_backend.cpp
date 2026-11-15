@@ -51,7 +51,7 @@ namespace fila {
 std::mutex m;
 std::condition_variable cv_tem, cv_vazia, cv_present;
 std::deque<std::function<void()>> q;
-bool ocupado = false, ligada = false, parar = false;
+bool ocupado = false, ligada = false, parar = false, dormindo = false;
 uint32_t presents_na_fila = 0;
 std::thread t;
 std::mutex m_sombra;
@@ -62,7 +62,9 @@ void rodar() {
         std::function<void()> f;
         {
             std::unique_lock<std::mutex> l(m);
+            dormindo = true;
             cv_tem.wait(l, [] { return parar || !q.empty(); });
+            dormindo = false;
             if (q.empty()) return;
             f = std::move(q.front());
             q.pop_front();
@@ -77,11 +79,13 @@ void rodar() {
     }
 }
 void por(std::function<void()> f) {
+    bool acordar;
     {
         std::lock_guard<std::mutex> l(m);
         q.push_back(std::move(f));
+        acordar = dormindo; // acordar custa uma chamada ao sistema: só se o thread de gravação está parado esperando
     }
-    cv_tem.notify_one();
+    if (acordar) cv_tem.notify_one();
 }
 // espera tudo o que foi pedido ser executado (para as leituras que precisam do estado em dia)
 void esvaziar() {

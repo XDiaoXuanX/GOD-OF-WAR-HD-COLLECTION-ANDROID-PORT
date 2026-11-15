@@ -36,6 +36,9 @@
 #ifdef __ANDROID__
 #include <fcntl.h>
 #include <unistd.h>
+#include "spirv-tools/libspirv.hpp"
+#include "spirv-tools/optimizer.hpp"
+#include <sys/resource.h>
 #endif
 
 namespace vt {
@@ -831,7 +834,13 @@ static std::string spv_name(uint32_t prog) {
 // custa milissegundos; abrir um .spv por programa no registro travava o carregamento do GOWShader por 9 s (Adreno
 // 732) a 39 s (PowerVR GE8320, e o jogo abortava logo depois, com o áudio fora do tempo). O pacote junta os ~9.800
 // .spv num arquivo só (índice + conteúdo), montado uma vez numa thread de fundo; depois, um open só e pread.
-// Formato: "VTSP1\0\0\0", u32 n, u64 bytes da pasta (conferência), n x {u64 hash, u64 offset, u32 tamanho}, dados.
+// Formato: "VTSP2\0\0\0", u32 n, u64 bytes da pasta (conferência), n x {u64 hash, u64 offset, u32 tamanho}, dados.
+// Versão 2: cada shader entra OTIMIZADO (SPIRV-Tools, no próprio celular). Os shaders traduzidos do Vita imitam os
+// registradores do chip com arrays enormes (pa[256], sa[512], temp[256], out[128], fpi[64]) zerados a cada execução;
+// o compilador do Turnip os desmonta, mas os da Qualcomm e da Mali os deixam na memória, e cada registrador vira um
+// acesso à memória: era o FPS muito abaixo do emulador nas Adreno 6xx e nas Mali. Os passos (os mesmos do PC)
+// desmontam os arrays em valores e tiram o código morto (160 MB -> 54 MB); cada resultado passa pelo validador do
+// Vulkan e, se falhar, fica o original. Assim vale para qualquer instalação, inclusive a pasta copiada do PC.
 static std::atomic<bool> g_pacote_pronto{false};
 static int g_pacote_fd = -1;
 static std::unordered_map<uint64_t, std::pair<uint64_t, uint32_t>> g_pacote_idx;
@@ -841,7 +850,7 @@ static bool pacote_carregar(const std::string &arq, uint32_t n_esperado, uint64_
     char cab[20];
     uint32_t n = 0;
     uint64_t bytes = 0;
-    if (::pread(fd, cab, 20, 0) != 20 || std::memcmp(cab, "VTSP1\0\0\0", 8) != 0) { ::close(fd); return false; }
+    if (::pread(fd, cab, 20, 0) != 20 || std::memcmp(cab, "VTSP2\0\0\0", 8) != 0) { ::close(fd); return false; }
     std::memcpy(&n, cab + 8, 4), std::memcpy(&bytes, cab + 12, 8);
     if (n != n_esperado || bytes != bytes_esperados) { ::close(fd); return false; }
     std::vector<uint8_t> idx((size_t)n * 20);
@@ -858,6 +867,22 @@ static bool pacote_carregar(const std::string &arq, uint32_t n_esperado, uint64_
     g_pacote_fd = fd;
     g_pacote_pronto = true;
     return true;
+}
+// um shader pelos passos do otimizador; false = fica o original
+static bool spv_otimizar(const std::vector<uint32_t> &in, std::vector<uint32_t> &out) {
+    static const std::vector<std::string> passos = {
+        "--private-to-local", "--scalar-replacement=0", "--ssa-rewrite", "--ccp", "--simplify-instructions",
+        "--copy-propagate-arrays", "--eliminate-dead-code-aggressive", "--eliminate-dead-inserts",
+        "--eliminate-local-single-store", "--eliminate-local-multi-store", "--redundancy-elimination",
+        "--eliminate-dead-code-aggressive"};
+    spvtools::Optimizer opt(SPV_ENV_VULKAN_1_1);
+    opt.SetMessageConsumer([](spv_message_level_t, const char *, const spv_position_t &, const char *) {});
+    if (!opt.RegisterPassesFromFlags(passos)) return false;
+    out.clear();
+    if (!opt.Run(in.data(), in.size(), &out) || out.size() < 5) return false;
+    spvtools::SpirvTools val(SPV_ENV_VULKAN_1_1);
+    val.SetMessageConsumer([](spv_message_level_t, const char *, const spv_position_t &, const char *) {});
+    return val.Validate(out);
 }
 static void pacote_iniciar(const std::string &dir) {
     if (getenv("VITART_SEM_PACOTE_SHADERS")) return;
@@ -887,22 +912,54 @@ static void pacote_iniciar(const std::string &dir) {
         if (!o) return;
         const uint32_t n = (uint32_t)arqs.size();
         std::vector<uint8_t> idx((size_t)n * 20);
-        std::fwrite("VTSP1\0\0\0", 1, 8, o);
+        std::fwrite("VTSP2\0\0\0", 1, 8, o);
         std::fwrite(&n, 4, 1, o);
         std::fwrite(&bytes, 8, 1, o);
         std::fwrite(idx.data(), 1, idx.size(), o);
         uint64_t off = 20 + idx.size();
-        std::vector<char> buf;
         bool ok = true;
-        for (uint32_t i = 0; i < n && ok; i++) {
-            std::ifstream f(arqs[i].second, std::ios::binary);
-            buf.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
-            const uint32_t len = (uint32_t)buf.size();
-            std::memcpy(&idx[(size_t)i * 20], &arqs[i].first, 8), std::memcpy(&idx[(size_t)i * 20 + 8], &off, 8);
-            std::memcpy(&idx[(size_t)i * 20 + 16], &len, 4);
-            ok = std::fwrite(buf.data(), 1, len, o) == len;
-            off += len;
+        // em blocos: várias threads leem e otimizam, a gravação segue a ordem do índice
+        static const bool sem_otimizar = getenv("VITART_SEM_OTIMIZAR_SHADERS") != nullptr;
+        const unsigned nt = std::max(1u, std::min(4u, std::thread::hardware_concurrency() / 2));
+        std::atomic<uint32_t> otimizados{0}, falhas{0};
+        uint64_t depois = 0;
+        constexpr uint32_t kBloco = 256;
+        for (uint32_t b0 = 0; b0 < n && ok; b0 += kBloco) {
+            const uint32_t b1 = std::min(n, b0 + kBloco);
+            std::vector<std::vector<uint32_t>> res(b1 - b0);
+            std::atomic<uint32_t> prox{b0};
+            auto trabalho = [&] {
+                setpriority(PRIO_PROCESS, 0, 10); // fundo: não disputa os núcleos com o jogo
+                std::vector<uint32_t> in;
+                for (uint32_t i; (i = prox++) < b1;) {
+                    std::ifstream f(arqs[i].second, std::ios::binary);
+                    std::vector<char> raw((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+                    in.assign(raw.size() / 4, 0);
+                    if (!in.empty()) std::memcpy(in.data(), raw.data(), in.size() * 4);
+                    std::vector<uint32_t> &o2 = res[i - b0];
+                    if (!sem_otimizar && in.size() >= 5 && spv_otimizar(in, o2)) otimizados++;
+                    else {
+                        if (!sem_otimizar) falhas++;
+                        o2 = in;
+                    }
+                }
+            };
+            std::vector<std::thread> ts;
+            for (unsigned k = 1; k < nt; k++) ts.emplace_back(trabalho);
+            trabalho();
+            for (auto &t : ts) t.join();
+            for (uint32_t i = b0; i < b1 && ok; i++) {
+                const std::vector<uint32_t> &c = res[i - b0];
+                const uint32_t len = (uint32_t)c.size() * 4;
+                std::memcpy(&idx[(size_t)i * 20], &arqs[i].first, 8), std::memcpy(&idx[(size_t)i * 20 + 8], &off, 8);
+                std::memcpy(&idx[(size_t)i * 20 + 16], &len, 4);
+                ok = std::fwrite(c.data(), 1, len, o) == len;
+                off += len, depois += len;
+            }
         }
+        if (!sem_otimizar)
+            logf("vitart: shaders otimizados no celular: %u (%u ficaram como estavam), %.0f MB -> %.0f MB", (uint32_t)otimizados,
+                 (uint32_t)falhas, bytes / 1048576.0, depois / 1048576.0);
         ok = ok && std::fseek(o, 20, SEEK_SET) == 0 && std::fwrite(idx.data(), 1, idx.size(), o) == idx.size();
         ok = std::fclose(o) == 0 && ok;
         if (!ok) { std::remove(tmp.c_str()); return; }

@@ -712,9 +712,19 @@ void game_options_tick() {
             using clk = std::chrono::steady_clock;
             static bool largo = false;
             static clk::time_point desde = clk::now();
-            const bool jogando = rd32(game_id() == 1 ? 0x812c2e04u : 0x812ec498u) == (game_id() == 1 ? 0xbu : 0xcu);
+            const uint32_t estado = rd32(game_id() == 1 ? 0x812c2e04u : 0x812ec498u);
+            const bool jogando = estado == (game_id() == 1 ? 0xbu : 0xcu);
+            // Para voltar a largo basta 0,4 s jogando; para ir ao 16:9 o estado tem de ficar 1,5 s fora do "jogando".
+            // Na luta (agarrões, golpes finais) o estado sai do "jogando" por instantes: com 0,4 s a imagem trocava
+            // de largura no meio da briga, e cada troca refaz os alvos -- quadros sem HUD, ampliados e com uma
+            // faixa preta em cima (relatado num Galaxy A37, Xclipse 530). Os menus ficam abertos bem mais que isso.
+            const auto espera = jogando ? std::chrono::milliseconds(400) : std::chrono::milliseconds(1500);
             if (jogando == largo) desde = clk::now();
-            else if (clk::now() - desde > std::chrono::milliseconds(400)) largo = jogando, desde = clk::now();
+            else if (clk::now() - desde > espera) {
+                largo = jogando, desde = clk::now();
+                static int avisos = 0;
+                if (avisos++ < 40) logf("vitart: imagem %s (estado do jogo 0x%x)", largo ? "larga" : "em 16:9 (menu)", estado);
+            }
             if (!largo) w = 1.f;
         }
         gvk::set_aspect_widen(w);

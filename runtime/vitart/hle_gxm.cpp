@@ -972,7 +972,7 @@ static void realign_streams(std::vector<gvk::VertexStream> &streams, std::vector
             old_off[i] = mine[i]->offset;
             const uint32_t cs = attr_size(mine[i]->fmt);
             bytes[i] = cs * mine[i]->comps;             // no layout novo (4 componentes se alargado)
-            copia[i] = exp_mine[i] ? cs * 3 : bytes[i]; // o que vem do vértice original
+            copia[i] = exp_mine[i] == 1 ? cs * 3 : bytes[i]; // o que vem do vértice original
             mine[i]->offset = cur;
             cur = (cur + bytes[i] + 3) & ~3u;
         }
@@ -982,8 +982,14 @@ static void realign_streams(std::vector<gvk::VertexStream> &streams, std::vector
             const uint8_t *src = st.data + (size_t)v * st.stride;
             uint8_t *out = dst.data() + (size_t)v * ns;
             for (size_t i = 0; i < mine.size(); i++) {
+                if (exp_mine[i] & 0x10) { // formato sem suporte: este atributo vira float (o resto segue cru)
+                    const uint32_t f0 = exp_mine[i] & 0x0F;
+                    float *o = reinterpret_cast<float *>(out + mine[i]->offset);
+                    for (uint32_t ch = 0; ch < mine[i]->comps; ch++) o[ch] = attr_value(src + old_off[i], f0, ch);
+                    continue;
+                }
                 std::memcpy(out + mine[i]->offset, src + old_off[i], copia[i]);
-                if (exp_mine[i]) attr_one(out + mine[i]->offset + copia[i], mine[i]->fmt);
+                if (exp_mine[i] == 1) attr_one(out + mine[i]->offset + copia[i], mine[i]->fmt);
             }
         }
         static bool avisou = false;
@@ -1324,8 +1330,20 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
                 static const bool forca3 = getenv("VITART_VK_FORCE_EXPAND3") != nullptr; // teste do alargar numa GPU que lê 3
                 if (!gvk::vertex_format_ok(fmt, nc) || (forca3 && nc == 3 && fmt != 9)) {
                     static const bool sem_alargar = getenv("VITART_VK_NO_EXPAND3") != nullptr;
-                    if (nc != 3 || sem_alargar || !gvk::vertex_format_ok(fmt, 4)) break;
-                    alarga = 1; // 3 componentes sem suporte: vai como 4, com o quarto = 1 (realign_streams)
+                    if (sem_alargar) break;
+                    if (nc == 3 && gvk::vertex_format_ok(fmt, 4)) alarga = 1; // vai como 4, o quarto = 1 (realign_streams)
+                    else if (fmt != 9 && gvk::vertex_format_ok(9, nc))
+                        // formato que a GPU não lê como vértice (os USCALED/SSCALED, opcionais no Vulkan, não existem no
+                        // driver da Qualcomm): só este atributo vira float, o resto do desenho segue cru
+                        alarga = (uint8_t)(0x10 | fmt);
+                    else break;
+                    static uint32_t visto = 0; // um aviso por formato: o log diz o que esta GPU não tem
+                    const uint32_t bit = 1u << (fmt * 4 + nc - 1 > 31 ? 31 : fmt * 4 + nc - 1);
+                    if (!(visto & bit)) {
+                        visto |= bit;
+                        logf("vitart: formato de vértice %u x%u sem suporte na GPU: %s", fmt, nc,
+                             alarga == 1 ? "vai com 4 componentes" : "este atributo vira float (o resto segue cru)");
+                    }
                 }
                 if (binding_of[st] < 0) {
                     binding_of[st] = (int)raw_streams.size();
@@ -1334,9 +1352,11 @@ static void vk_draw_impl(Context &c, uint32_t prim, uint32_t itype, uint32_t ida
                     vs_.data = ptr<uint8_t>(c.streams[st] + mini * vs_.stride);
                     raw_streams.push_back(vs_);
                 }
-                end_of[st] = std::max(end_of[st], off + attr_size(fmt) * (alarga ? 3 : nc));
+                end_of[st] = std::max(end_of[st], off + attr_size(fmt) * (alarga == 1 ? 3 : nc));
                 gvk::VertexAttr va;
-                va.location = (uint32_t)k, va.stream = (uint32_t)binding_of[st], va.offset = off, va.fmt = fmt, va.comps = alarga ? 4 : nc;
+                va.location = (uint32_t)k, va.stream = (uint32_t)binding_of[st], va.offset = off;
+                va.fmt = alarga & 0x10 ? 9u : fmt;          // convertido: float no layout novo
+                va.comps = alarga == 1 ? 4 : nc;
                 raw_attrs.push_back(va);
                 alargar.push_back(alarga);
                 found = true;

@@ -81,6 +81,12 @@ final class Pastas {
         if (!raiz.isDirectory()) return Tr.t("a pasta ") + NOME;
         File app = jogo(raiz);
         if (!new File(app, "eboot.bin").isFile() && !new File(app, "exec").isDirectory()) return "game/PCSA00126";
+        // os dois jogos moram nos psarc de exec/: sem eles o jogo abre e quebra ao ler o r_perma (cópia pela metade
+        // ou extração interrompida)
+        for (String ps : new String[]{"gow1_psp2_SCEA.psarc", "gow2_psp2_SCEA.psarc"}) {
+            File f = new File(app, "exec/" + ps);
+            if (!f.isFile() || f.length() < (100L << 20)) return "game/PCSA00126/exec/" + ps;
+        }
         if (!new File(raiz, "shaders").isDirectory()) return "shaders";
         if (!new File(raiz, "data").isDirectory()) return "data";
         return null;

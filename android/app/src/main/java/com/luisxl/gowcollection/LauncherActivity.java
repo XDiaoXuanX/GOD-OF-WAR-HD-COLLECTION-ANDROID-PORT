@@ -23,7 +23,6 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
-import android.view.animation.LinearInterpolator;
 import android.widget.Toast;
 
 import java.io.File;
@@ -265,7 +264,18 @@ public final class LauncherActivity extends Activity {
         private float noAntes;
         private float t;
         private long ultimoQuadro;           // relógio real: a tela de 120 Hz não pode andar no dobro
-        private final ValueAnimator relogio = ValueAnimator.ofFloat(0, 1);
+        // o relógio da tela é o Choreographer, não um ValueAnimator: com a "escala de duração do Animator" desligada
+        // (opções do desenvolvedor, economia de bateria ou "remover animações") o ValueAnimator não anda, e a
+        // abertura ficava parada no primeiro quadro (tela preta no lançador)
+        private boolean rodando;
+        private final android.view.Choreographer.FrameCallback relogio = new android.view.Choreographer.FrameCallback() {
+            @Override
+            public void doFrame(long nanos) {
+                if (!rodando) return;
+                quadro();
+                android.view.Choreographer.getInstance().postFrameCallback(this);
+            }
+        };
         private final RectF[] alvo = new RectF[12];
         // apoie o projeto (LivePix e PayPal, com o QR do LivePix) e a abertura (logo, depois o aviso)
         private boolean apoio;
@@ -300,10 +310,10 @@ public final class LauncherActivity extends Activity {
             } catch (Exception ignorada) {
                 // sem o QR: só os botões
             }
-            relogio.setDuration(1000);
-            relogio.setRepeatCount(ValueAnimator.INFINITE);
-            relogio.setInterpolator(new LinearInterpolator());
-            relogio.addUpdateListener(v -> {
+        }
+
+        private void quadro() {
+            {
                 long agora = System.nanoTime();
                 float dt = ultimoQuadro == 0 ? 0f : Math.min(0.1f, (agora - ultimoQuadro) / 1e9f);
                 ultimoQuadro = agora;
@@ -314,7 +324,7 @@ public final class LauncherActivity extends Activity {
                 if (troca < 1f) troca = Math.min(1f, troca + dt / FADE);
                 if (noFundo >= CICLO && !painel()) trocarFundo(proximoFundo(), true);
                 invalidate();
-            });
+            }
         }
 
         // ---------------------------------------------------------------- estado e arte
@@ -2318,13 +2328,18 @@ public final class LauncherActivity extends Activity {
         @Override
         protected void onAttachedToWindow() {
             super.onAttachedToWindow();
-            relogio.start();
+            if (!rodando) {
+                rodando = true;
+                ultimoQuadro = 0;
+                android.view.Choreographer.getInstance().postFrameCallback(relogio);
+            }
             requestFocus(); // sem foco, o controle e o Enter do teclado não chegavam aqui
         }
 
         @Override
         protected void onDetachedFromWindow() {
-            relogio.cancel();
+            rodando = false;
+            android.view.Choreographer.getInstance().removeFrameCallback(relogio);
             super.onDetachedFromWindow();
         }
 

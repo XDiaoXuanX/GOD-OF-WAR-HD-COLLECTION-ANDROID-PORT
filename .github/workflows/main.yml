@@ -20,16 +20,11 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Setup Android SDK & NDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install NDK
-        run: sdkmanager --install "ndk;27.2.12479018"
-
       - name: Build Native Libraries (32-bit)
         env:
-          ANDROID_NDK: ${{ env.ANDROID_SDK_ROOT }}/ndk/27.2.12479018
+          ANDROID_NDK: ${{ env.ANDROID_NDK_LATEST_HOME }}
         run: |
+          echo "Using NDK at: $ANDROID_NDK"
           chmod +x scripts/*.sh
           ./scripts/build-android-pfs.sh
           ./scripts/build-android-runtime.sh

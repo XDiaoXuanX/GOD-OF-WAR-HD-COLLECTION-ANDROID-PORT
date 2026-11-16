@@ -27,7 +27,15 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
-#include "android/droid.h" // teclado físico no celular: droid::key_down com os mesmos VK_
+#include "android/droid.h" // teclado físico no celular: droid::key_down com os mesmos VK_*
+#include <time.h>
+static inline uint64_t vt_now_ns() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+
 #endif
 
 namespace vt::inmap {

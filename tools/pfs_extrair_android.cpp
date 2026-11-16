@@ -49,10 +49,10 @@ struct Pkg {
   };
   std::vector<Item> items;
 
-  void read(uint64_t rel, unsigned char *out, size_t size) {
+    void read(uint64_t rel, unsigned char *out, size_t size) {
     if (size == 0) return;
     const uint64_t start = rel & ~15ull, skip = rel - start;
-    fseeko(f, (off_t)(enc_offset + start), SEEK_SET);
+    std::vector<unsigned char> buf((size_t)(skip + size + 15) & ~(size_t)15);
     if (fseeko(f, (off_t)(enc_offset + start), SEEK_SET) != 0)
       erro("PKG seek falhou (arquivo >2GB?)");
     const size_t got = std::fread(buf.data(), 1, buf.size(), f);

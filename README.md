@@ -7,7 +7,7 @@
 **PS Vita → Android arm64 · recompilação estática / static recompilation · Vulkan**
 
 ![Android](https://img.shields.io/badge/Android-9%2B%20(API%2028)-3DDC84?logo=android&logoColor=white)
-![ABI](https://img.shields.io/badge/ABI-arm64--v8a-0A84FF)
+![ABI](https://img.shields.io/badge/ABI-armeabi--v7a-0A84FF)
 ![Vulkan](https://img.shields.io/badge/Vulkan-1.1-AC162C?logo=vulkan&logoColor=white)
 ![Status](https://img.shields.io/badge/status-demonstração%20%2F%20demo-orange)
 ![Suporte](https://img.shields.io/badge/suporte%20%2F%20support-nenhum%20%2F%20none-lightgrey)

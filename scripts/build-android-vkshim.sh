@@ -27,9 +27,16 @@ N=$(wc -l < "$O/nomes.txt")
   echo ".text"; i=0
   while read -r f; do
     echo ".globl $f"; echo ".type $f,%function"; echo ".p2align 2"
-    echo "$f:"; echo "  ldr r12, =g_vkshim+$((i*4))"; echo "  ldr pc, [r12]"
+    echo "$f:"
+    echo "  ldr r12, 1f"
+    echo "0: add r12, pc, r12"
+    echo "  ldr r12, [r12]"
+    echo "  ldr pc, [r12, #$((i*4))]"
+    echo ".p2align 2"
+    echo "1: .word g_vkshim(GOT) - (0b + 8)"
     echo ".size $f, .-$f"; i=$((i+1))
   done < "$O/nomes.txt"; } > "$O/vkshim_stubs.s"
+  
 { echo "{ global:"; sed 's/.*/  &;/' "$O/nomes.txt"; echo "  vitart_vk_driver_status;"; echo "  local: *; };"; } > "$O/vkshim.map"
 
 # 2. libadrenotools e o contorno de namespace (estáticos, dentro do shim e do hook_impl)

@@ -19,8 +19,6 @@ CXXF="$T -std=c++20 -O2 -fPIC -w -Wno-c++11-narrowing -I$AT/include -I$AT -I$AT/
     vkEnumerateInstanceLayerProperties vkEnumerateInstanceVersion vkEnumerateDeviceExtensionProperties \
     vkGetPhysicalDeviceFeatures2 vkGetPhysicalDeviceProperties2; } | sort -u > "$O/nomes.txt"
 N=$(wc -l < "$O/nomes.txt")
-{ echo "// gerado por scripts/build-android-vkshim.sh"; echo "enum { kVkshimCount = $N };"
-  echo "static const char *const kVkshimNames[kVkshimCount] = {"; sed 's/.*/  "&",/' "$O/nomes.txt"; echo "};"; } > "$O/vkshim_names.h"
 { echo "// gerado: cada função salta pela tabela g_vkshim"
   echo ".syntax unified"
   echo ".arm"
@@ -28,12 +26,10 @@ N=$(wc -l < "$O/nomes.txt")
   while read -r f; do
     echo ".globl $f"; echo ".type $f,%function"; echo ".p2align 2"
     echo "$f:"
-    echo "  ldr r12, 1f"
+    echo "  movw r12, #:lower16:(g_vkshim - (0f + 8))"
+    echo "  movt r12, #:upper16:(g_vkshim - (0f + 8))"
     echo "0: add r12, pc, r12"
-    echo "  ldr r12, [r12]"
     echo "  ldr pc, [r12, #$((i*4))]"
-    echo ".p2align 2"
-    echo "1: .word g_vkshim(GOT) - (0b + 8)"
     echo ".size $f, .-$f"; i=$((i+1))
   done < "$O/nomes.txt"; } > "$O/vkshim_stubs.s"
   

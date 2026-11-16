@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.."
 NDK="${ANDROID_NDK:-$LOCALAPPDATA/Android/Sdk/ndk/29.0.14206865}"
 TC="$NDK/toolchains/llvm/prebuilt/windows-x86_64/bin"
 [ -x "$TC/clang.exe" ] || TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
-T=--target=aarch64-linux-android28
+T="--target=armv7a-linux-androideabi28 
 PP=third_party/psvpfsparser
 mkdir -p build/lib
 "$TC/clang++" $T -std=c++20 -O2 -w -fPIE -pie -I $PP tools/pfs_extrair_android.cpp $PP/*.cpp -static-libstdc++ \

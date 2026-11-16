@@ -11,7 +11,7 @@ AT="${ADRENOTOOLS:-third_party/adrenotools}"
 [ -f build/lib/libvitart.so ] || { echo "falta build/lib/libvitart.so (rode o build-android-runtime.sh)"; exit 1; }
 O=build/vkshim; mkdir -p "$O" build/lib
 LD="-Wl,-z,max-page-size=16384 -Wl,--no-undefined"
-CXXF="$T -std=c++20 -O2 -fPIC -w -I$AT/include -I$AT -I$AT/lib/linkernsbypass"
+CXXF="$T -std=c++20 -O2 -fPIC -w -Wno-c++11-narrowing -I$AT/include -I$AT -I$AT/lib/linkernsbypass"
 
 # 1. as funções: as que o libvitart.so importa + as de entrada do loader
 { "$TC/llvm-nm" -D --undefined-only build/lib/libvitart.so | grep -o '\bvk[A-Za-z0-9_]*'

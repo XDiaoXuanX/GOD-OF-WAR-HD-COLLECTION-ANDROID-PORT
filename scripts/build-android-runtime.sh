@@ -33,7 +33,7 @@ export TC CXXF T INC OBJ
 SRC=()
 for f in runtime/vitart/*.cpp runtime/vitart/android/*.cpp games/gow/*.cpp; do
   case "$f" in
-    */gxm_d3d11.cpp|*/gxm_window.cpp|*/host_input.cpp|*/trophy_banner.cpp|*/runtime/vitart/video_hd.cpp) continue;;
+    */gxm_d3d11.cpp|*/gxm_window.cpp|*/host_input.cpp|*/trophy_banner.cpp|*/video_hd.cpp) continue;;
   esac
   SRC+=("$f")
 done

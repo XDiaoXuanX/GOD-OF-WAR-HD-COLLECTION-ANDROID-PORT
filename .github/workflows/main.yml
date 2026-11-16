@@ -21,9 +21,8 @@ jobs:
           distribution: 'temurin'
 
       - name: Build Native Libraries (32-bit)
-        env:
-          ANDROID_NDK: ${{ env.ANDROID_NDK_LATEST_HOME }}
         run: |
+          export ANDROID_NDK=$(ls -d /usr/local/lib/android/sdk/ndk/* | sort -V | tail -n 1)
           echo "Using NDK at: $ANDROID_NDK"
           chmod +x scripts/*.sh
           ./scripts/build-android-pfs.sh

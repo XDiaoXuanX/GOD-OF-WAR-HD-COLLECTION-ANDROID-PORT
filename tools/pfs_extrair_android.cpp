@@ -52,7 +52,7 @@ struct Pkg {
   void read(uint64_t rel, unsigned char *out, size_t size) {
     if (size == 0) return;
     const uint64_t start = rel & ~15ull, skip = rel - start;
-    std::vector<unsigned char> buf((size_t)(skip + size + 15) & ~(size_t)15);
+    fseeko(f, (off_t)(enc_offset + start), SEEK_SET);
     if (fseeko(f, (off_t)(enc_offset + start), SEEK_SET) != 0)
       erro("PKG seek falhou (arquivo >2GB?)");
     const size_t got = std::fread(buf.data(), 1, buf.size(), f);
@@ -200,7 +200,7 @@ int decifrar_pfs(const fs::path &tmp, const fs::path &out, const unsigned char *
   std::fflush(stdout);
   std::error_code ec;
   auto cryptops = CryptoOperationsFactory::create(CryptoOperationsTypes::openssl);
-  auto f00d = F00DKeyEncryptorFactory::create(F00DKeyEncryptorTypes::native, cryptops);
+  auto f00d = F00DKeyEncryptorFactory::create(F00DEncryptorTypes::native, cryptops);
   Progresso pb;
   pb.total = arquivos;
   std::ostream log(&pb);
@@ -208,7 +208,7 @@ int decifrar_pfs(const fs::path &tmp, const fs::path &out, const unsigned char *
   try {
     PfsFilesystem pfs(cryptops, f00d, log, klicensee, tmp);
     if (pfs.mount() < 0) { log.flush(); erro("PFS não montou (licença errada?)"); }
-    pfs.decrypt_files(out);
+    r = pfs.decrypt_files(out);
     log.flush();
     if (r >= 0 && get_keystone(cryptops, out) < 0) r = -1;
   } catch (const std::exception &e) {

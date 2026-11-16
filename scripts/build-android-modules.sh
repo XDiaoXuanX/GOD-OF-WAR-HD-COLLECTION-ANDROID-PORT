@@ -19,7 +19,7 @@ TC="$NDK/toolchains/llvm/prebuilt/windows-x86_64/bin"
 CC="$TC/clang"; STRIP="$TC/llvm-strip"
 JOBS="${JOBS:-4}"
 export PYTHONPATH="$PC/vitarecomp" PYTHONIOENCODING=utf-8 PYTHONDONTWRITEBYTECODE=1 CC
-export CFLAGS="--target=aarch64-linux-android28 -c -fPIC ${OPT:--O2} -w -fwrapv -fno-strict-aliasing -ffp-contract=off -fno-math-errno -fvisibility=hidden -ffunction-sections -I $HERE/runtime/arm"
+export CFLAGS="--target=armv7a-linux-androideabi28 -march=armv7-a -mfloat-abi=softfp -mfpu=neon -c -fPIC ${OPT:--O2} -w -fwrapv -fno-strict-aliasing -ffp-contract=off -fno-math-errno -fvisibility=hidden -ffunction-sections -I $HERE/runtime/arm"
 mkdir -p "$OUT/lib"
 
 # só os pontos de entrada da cola ficam visíveis: sem isso dois módulos com o mesmo arc_mem/arc_import
@@ -49,7 +49,7 @@ build_plan() {
         '"$CC" $CFLAGS {} -o "'"$obj"'/$(basename {} .c).o" 2> "'"$obj"'/$(basename {} .c).err" || { echo "   FALHOU {}"; head -5 "'"$obj"'/$(basename {} .c).err"; }' )
     # com -shared o lld aceita símbolo indefinido: um .o faltando só apareceria no celular
     [ "$(ls "$gen"/*.c | wc -l)" -eq "$(ls "$obj"/*.o 2>/dev/null | wc -l)" ] || { echo "== $m: faltam objetos"; exit 1; }
-    "$CC" --target=aarch64-linux-android28 -shared -fPIC -o "$so" "$obj"/*.o \
+    "$CC" --target=armv7a-linux-androideabi28. -shared -fPIC -o "$so" "$obj"/*.o \
       -Wl,--version-script="$OUT/exports.map" -Wl,-soname,"libvt_$m.so" -Wl,--gc-sections \
       -Wl,-z,max-page-size=16384 -Wl,-z,noexecstack -Wl,--no-undefined -lm
     "$STRIP" --strip-unneeded "$so"

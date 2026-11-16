@@ -19,6 +19,8 @@ CXXF="$T -std=c++20 -O2 -fPIC -w -Wno-c++11-narrowing -I$AT/include -I$AT -I$AT/
     vkEnumerateInstanceLayerProperties vkEnumerateInstanceVersion vkEnumerateDeviceExtensionProperties \
     vkGetPhysicalDeviceFeatures2 vkGetPhysicalDeviceProperties2; } | sort -u > "$O/nomes.txt"
 N=$(wc -l < "$O/nomes.txt")
+{ echo "// gerado por scripts/build-android-vkshim.sh"; echo "enum { kVkshimCount = $N };"
+  echo "static const char *const kVkshimNames[kVkshimCount] = {"; sed 's/.*/  "&",/' "$O/nomes.txt"; echo "};"; } > "$O/vkshim_names.h"
 { echo "// gerado: cada função salta pela tabela g_vkshim"
   echo ".syntax unified"
   echo ".arm"

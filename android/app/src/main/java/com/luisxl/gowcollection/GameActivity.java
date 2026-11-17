@@ -77,7 +77,6 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
 
     private static GameActivity ativa;
     private ControlesView controles;
-    private final SpartanArenaEngine meuJogo = new SpartanArenaEngine();
     private final Handler ui = new Handler(Looper.getMainLooper());
 
     // o que a tela e o controle físico pedem, somados em enviar()
@@ -129,7 +128,7 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
         setContentView(raiz);
         telaCheia();
         nativeRefreshRate(Math.round(getWindowManager().getDefaultDisplay().getRefreshRate()));
-        if (!previa) meuJogo.start();
+        if (!previa) iniciar(pasta, principal);
         else Toast.makeText(this, Tr.t("Prévia dos controles: o ômega no alto abre as opções"), Toast.LENGTH_LONG).show();
     }
 
@@ -218,13 +217,13 @@ public final class GameActivity extends Activity implements SurfaceHolder.Callba
 
     // ---------------------------------------------------------------- superfície
     @Override
-    public void surfaceCreated(SurfaceHolder h) { meuJogo.setHolder(h); meuJogo.start(); }
+    public void surfaceCreated(SurfaceHolder h) { nativeSurface(h.getSurface()); }
 
     @Override
-    public void surfaceChanged(SurfaceHolder h, int f, int w, int hh) { meuJogo.setHolder(h); meuJogo.setSize(w, hh); }
+    public void surfaceChanged(SurfaceHolder h, int f, int w, int hh) { nativeSurfaceSize(w, hh); }
 
     @Override
-    public void surfaceDestroyed(SurfaceHolder h) { meuJogo.stop(); meuJogo.setHolder(null); }
+    public void surfaceDestroyed(SurfaceHolder h) { nativeSurface(null); } // espera o Vulkan soltar
 
     // ---------------------------------------------------------------- controles da tela
     @Override

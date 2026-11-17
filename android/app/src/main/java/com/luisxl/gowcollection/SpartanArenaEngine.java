@@ -222,7 +222,7 @@ c.drawArc(new RectF(a.x - a.rad, a.y - a.rad, a.x + a.rad, a.y + a.rad), start, 
 p.setStyle(Paint.Style.FILL);
 for (Enemy e : enemies) {
 p.setColor(Color.argb(120, 0, 0, 0));
-c.drawOval(new RectF(e.x - e.r, e.y + e.r0.5f, e.x + e.r, e.y + e.r1.05f), p);
+c.drawOval(new RectF(e.x - e.r, e.y + e.r * 0.5f, e.x + e.r, e.y + e.r * 1.05f), p);
 p.setColor(e.flash > 0 ? Color.WHITE : (e.boss ? Color.rgb(125, 38, 32) : Color.rgb(68, 82, 74)));
 c.drawCircle(e.x, e.y, e.r, p);
 // Helm & Zirah Perunggu

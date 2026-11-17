@@ -225,3 +225,4 @@ holder.unlockCanvasAndPost(c);
 
 }
 
+}

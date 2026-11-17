@@ -145,7 +145,7 @@ struct sce_ng_pfs_flat_block_t
    sce_ng_pfs_file_info_proxy_t m_info;
    sce_ng_pfs_hash_t hash;
 };
-
+#pragma pack(pop)
 struct sce_ng_pfs_file_t
 {
 private:
@@ -190,7 +190,7 @@ public:
    }
 };
 
-#pragma pack(pop)
+
 
 bool is_directory(sce_ng_pfs_file_types type);
 

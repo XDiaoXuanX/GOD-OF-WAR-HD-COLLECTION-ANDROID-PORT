@@ -280,6 +280,7 @@ static void on_fault(int, siginfo_t *si, void *) {
         logf("vitart: acesso a endereço do guest não mapeado 0x%08x", static_cast<uint32_t>(host - g_mem));
         dump_thread_regs();
     }
+    { FILE *fl = fopen("/sdcard/gow_boot.txt", "a"); if (fl) { fprintf(fl, "CRASH SIGSEGV at host=%p guest_off=0x%x\n", si->si_addr, (uint32_t)((uint8_t*)si->si_addr - g_mem)); fclose(fl); } }
     sigaction(SIGSEGV, &g_old_segv, nullptr); // volta a instrução e cai de verdade
 }
 
@@ -323,10 +324,10 @@ bool query_guest(uint64_t addr, uint64_t &start, uint64_t &end, bool &committed)
 }
 
 static void mem_init() {
-    size_t g_reserve_sz = 0x50000000u;
+    size_t g_reserve_sz = 0x45000000u;
     void *p = mmap(nullptr, g_reserve_sz, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if (p == MAP_FAILED) {
-        g_reserve_sz = 0x40000000u;
+        g_reserve_sz = 0x42000000u;
         p = mmap(nullptr, g_reserve_sz, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     }
     if (p == MAP_FAILED) {
@@ -335,7 +336,7 @@ static void mem_init() {
         fatal("não foi possível reservar espaço de endereços 32-bit para o guest");
     }
     { FILE *fl = fopen("/sdcard/gow_boot.txt", "a"); if (fl) { fprintf(fl, "SUCCESS: mmap p=%p size=0x%zx\n", p, g_reserve_sz); fclose(fl); } }
-    g_mem = static_cast<uint8_t *>(p) - 0x40000000u;
+    g_mem = static_cast<uint8_t *>(p) - 0x4A000000u;
     struct sigaction sa{};
     sa.sa_sigaction = on_fault;
     sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
@@ -1068,10 +1069,13 @@ int main(int argc, char **argv) {
 
     mem_init();
     for (const std::string &d : dlls)
+        { FILE *fl = fopen("/sdcard/gow_boot.txt", "a"); if (fl) { fprintf(fl, "STEP 2: Loading module %s\n", d.c_str()); fclose(fl); } }
         load_module(d);
     if (!hle_vars.empty())
         load_hle_vars(hle_vars);
+    { FILE *fl = fopen("/sdcard/gow_boot.txt", "a"); if (fl) { fprintf(fl, "STEP 3: Linking imports...\n"); fclose(fl); } }
     link_imports();
+    { FILE *fl = fopen("/sdcard/gow_boot.txt", "a"); if (fl) { fprintf(fl, "STEP 4: Starting main game thread...\n"); fclose(fl); } }
     if (getenv("VITART_CONFERIR")) { // só confere a montagem (DLLs, variáveis, caminhos) e sai, sem janela
         logf("vitart: conferido: %zu módulos, app %s, dados %s", g_modules.size(), g_app.c_str(), g_data.c_str());
         if (g_logfile) fflush(g_logfile);

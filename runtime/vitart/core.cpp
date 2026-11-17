@@ -1068,9 +1068,10 @@ int main(int argc, char **argv) {
     prof_start();
 
     mem_init();
-    for (const std::string &d : dlls)
+    for (const std::string &d : dlls) {
         { FILE *fl = fopen("/sdcard/gow_boot.txt", "a"); if (fl) { fprintf(fl, "STEP 2: Loading module %s\n", d.c_str()); fclose(fl); } }
         load_module(d);
+    }
     if (!hle_vars.empty())
         load_hle_vars(hle_vars);
     { FILE *fl = fopen("/sdcard/gow_boot.txt", "a"); if (fl) { fprintf(fl, "STEP 3: Linking imports...\n"); fclose(fl); } }

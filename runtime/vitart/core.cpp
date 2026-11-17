@@ -118,7 +118,7 @@ void map_region(uint32_t addr, uint32_t size, const char *what) {
     // sem tratador que confirme sob demanda: a faixa já nasce gravável (o kernel só entrega a página no
     // primeiro toque, então não gasta memória)
     const uint64_t lo = (uint64_t)addr & ~0xFFFull, hi = ((uint64_t)addr + (size ? size : 1) + 0xFFF) & ~0xFFFull;
-    if (g_mem) mprotect(g_mem + lo, hi - lo, PROT_READ | PROT_WRITE);
+    if (g_mem) { mprotect(g_mem + lo, hi - lo, PROT_READ | PROT_WRITE); }
 #endif
 }
 
@@ -260,6 +260,7 @@ static LONG CALLBACK on_fault(EXCEPTION_POINTERS *ep) {
 }
 
 static void mem_init() {
+    if (g_mem) return;
     g_mem = static_cast<uint8_t *>(VirtualAlloc(nullptr, 1ull << 32, MEM_RESERVE, PAGE_NOACCESS));
     if (!g_mem)
         fatal("não foi possível reservar 4 GiB de espaço de endereços para o guest");
@@ -324,6 +325,7 @@ bool query_guest(uint64_t addr, uint64_t &start, uint64_t &end, bool &committed)
 }
 
 static void mem_init() {
+    if (g_mem) return;
     size_t g_reserve_sz = 0x45000000u;
     void *p = mmap(nullptr, g_reserve_sz, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if (p == MAP_FAILED) {
@@ -568,7 +570,9 @@ static void load_module(const std::string &path) {
     if (!m.lib)
         fatal("não foi possível carregar %s (erro %lu)", path.c_str(), GetLastError());
 #else
+    { FILE *fl = fopen("/sdcard/gow_boot.txt", "a"); if (fl) { fprintf(fl, "  STEP 2a: Calling dlopen...\n"); fflush(fl); fclose(fl); } }
     m.lib = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    { FILE *fl = fopen("/sdcard/gow_boot.txt", "a"); if (fl) { fprintf(fl, "  STEP 2b: dlopen returned %p\n", m.lib); fflush(fl); fclose(fl); } }
     if (!m.lib)
         fatal("não foi possível carregar %s (%s)", path.c_str(), dlerror());
 #endif
@@ -602,6 +606,7 @@ static void load_module(const std::string &path) {
         if (region_of(s.vaddr, &st, nullptr, &what) || region_of(s.vaddr + s.memsz - 1, &st, nullptr, &what))
             fatal("%s: segmento 0x%08x sobrepõe %s", path.c_str(), s.vaddr, what.c_str());
         { FILE *fl = fopen("/sdcard/gow_boot.txt", "a"); if (fl) { fprintf(fl, "  SEG %u: vaddr=0x%08x memsz=0x%x filesz=0x%x target=%p\n", i, s.vaddr, s.memsz, s.filesz, g_mem + s.vaddr); fflush(fl); fclose(fl); } }
+        if (!g_mem) mem_init();
         map_region(s.vaddr, s.memsz, (std::string(m.info->name) + ":seg" + std::to_string(i)).c_str());
         std::memcpy(g_mem + s.vaddr, s.data, s.filesz);
     }
@@ -1068,11 +1073,11 @@ int main(int argc, char **argv) {
     g_strict = getenv("VITART_STRICT") != nullptr;
     prof_start();
 
-    mem_init();
     for (const std::string &d : dlls) {
         { FILE *fl = fopen("/sdcard/gow_boot.txt", "a"); if (fl) { fprintf(fl, "STEP 2: Loading module %s\n", d.c_str()); fclose(fl); } }
         load_module(d);
     }
+    mem_init();
     if (!hle_vars.empty())
         load_hle_vars(hle_vars);
     { FILE *fl = fopen("/sdcard/gow_boot.txt", "a"); if (fl) { fprintf(fl, "STEP 3: Linking imports...\n"); fclose(fl); } }

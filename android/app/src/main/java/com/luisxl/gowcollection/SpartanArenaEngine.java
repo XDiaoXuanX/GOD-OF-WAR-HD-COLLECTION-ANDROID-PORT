@@ -10,8 +10,8 @@ public class SpartanArenaEngine implements Runnable {
     private Thread thread;
     private int w = 1280, h = 720, btns = 0, lx = 128, ly = 128, prevBtns = 0;
     private float px, py, pvx, pvy, pAng = 0, hp = 100, rage = 30;
-    private float dashT = 0, dashCd = 0, atkT = 0, jZ = 0, jVz = 0, invT = 0, shkT = 0;
-    private int wave = 1, score = 0, combo = 0;
+    private float dashT = 0, dashCd = 0, atkT = 0, jZ = 0, jVz = 0, invT = 0, shkT = 0, animT = 0, lightningT = 0;
+    private int wave = 1, score = 0, combo = 0, comboT = 0;
     private boolean gameOver = false;
     private final Random rng = new Random();
     private final List<Enemy> enemies = new ArrayList<>();
@@ -19,7 +19,7 @@ public class SpartanArenaEngine implements Runnable {
     private final List<Arc> arcs = new ArrayList<>();
 
     static class Enemy {
-        float x, y, hp, maxHp, r, spd, cd;
+        float x, y, hp, maxHp, r, spd, cd, flash;
         boolean boss;
         Enemy(float x, float y, float hp, float r, float spd, boolean boss) {
             this.x = x; this.y = y; this.hp = hp; this.maxHp = hp;
@@ -28,14 +28,16 @@ public class SpartanArenaEngine implements Runnable {
     }
     static class Spark {
         float x, y, vx, vy, life;
-        Spark(float x, float y, float vx, float vy, float life) {
-            this.x = x; this.y = y; this.vx = vx; this.vy = vy; this.life = life;
+        int col;
+        Spark(float x, float y, float vx, float vy, float life, int col) {
+            this.x = x; this.y = y; this.vx = vx; this.vy = vy; this.life = life; this.col = col;
         }
     }
     static class Arc {
-        float x, y, ang, rad, life;
-        Arc(float x, float y, float ang, float rad, float life) {
-            this.x = x; this.y = y; this.ang = ang; this.rad = rad; this.life = life;
+        float x, y, ang, rad, life, maxLife;
+        boolean heavy;
+        Arc(float x, float y, float ang, float rad, float life, boolean heavy) {
+            this.x = x; this.y = y; this.ang = ang; this.rad = rad; this.life = life; this.maxLife = life; this.heavy = heavy;
         }
     }
 
@@ -59,7 +61,7 @@ public class SpartanArenaEngine implements Runnable {
     public synchronized void stop() { running = false; }
 
     private synchronized void reset() {
-        px = w * 0.5f; py = h * 0.55f; hp = 100; rage = 30;
+        px = w * 0.5f; py = h * 0.56f; hp = 100; rage = 35;
         wave = 1; score = 0; combo = 0; gameOver = false;
         enemies.clear(); sparks.clear(); arcs.clear();
         spawnWave(1);
@@ -67,10 +69,10 @@ public class SpartanArenaEngine implements Runnable {
 
     private void spawnWave(int wv) {
         for (int i = 0; i < 3 + wv * 2; i++) {
-            float a = rng.nextFloat() * 6.283f, d = Math.max(w, h) * 0.55f;
-            enemies.add(new Enemy(w * 0.5f + (float)Math.cos(a)*d, h * 0.55f + (float)Math.sin(a)*d, 35 + wv*12, 24, 115 + wv*8, false));
+            float a = rng.nextFloat() * 6.283f, d = Math.max(w, h) * 0.52f;
+            enemies.add(new Enemy(w * 0.5f + (float)Math.cos(a)*d, h * 0.56f + (float)Math.sin(a)*d, 40 + wv*14, 26, 118 + wv*8, false));
         }
-        if (wv % 2 == 0) enemies.add(new Enemy(w * 0.5f, 95, 170 + wv*45, 44, 85, true));
+        if (wv % 2 == 0) enemies.add(new Enemy(w * 0.5f, 110, 190 + wv*50, 48, 88, true));
     }
 
     public void run() {
@@ -86,6 +88,10 @@ public class SpartanArenaEngine implements Runnable {
     }
 
     private synchronized void update(float dt) {
+        animT += dt;
+        if (lightningT > 0) lightningT -= dt;
+        else if (rng.nextFloat() < 0.008f) lightningT = 0.14f;
+
         int b = btns, pr = b & ~prevBtns; prevBtns = b;
         if (gameOver) {
             if ((pr & (ControlesView.CRUZ | ControlesView.QUADRADO | ControlesView.START)) != 0) reset();
@@ -106,42 +112,47 @@ public class SpartanArenaEngine implements Runnable {
         else { ax = 0; ay = 0; }
 
         if ((pr & ControlesView.CIRCULO) != 0 && dashCd <= 0) {
-            dashT = 0.18f; dashCd = 0.6f; invT = 0.3f;
-            pvx = (float)Math.cos(pAng) * 760; pvy = (float)Math.sin(pAng) * 760;
+            dashT = 0.18f; dashCd = 0.55f; invT = 0.32f;
+            pvx = (float)Math.cos(pAng) * 780; pvy = (float)Math.sin(pAng) * 780;
         }
-        if ((pr & ControlesView.CRUZ) != 0 && jZ <= 0.1f) jVz = 430;
+        if ((pr & ControlesView.CRUZ) != 0 && jZ <= 0.1f) jVz = 440;
         if (jZ > 0 || jVz != 0) {
-            jZ += jVz * dt; jVz -= 1150 * dt;
-            if (jZ <= 0) { jZ = 0; jVz = 0; hitArea(130, 24); }
+            jZ += jVz * dt; jVz -= 1180 * dt;
+            if (jZ <= 0) { jZ = 0; jVz = 0; shkT = 0.14f; hitArea(145, 28); }
         }
-        if ((pr & ControlesView.QUADRADO) != 0 && atkT <= 0.08f) {
-            atkT = 0.22f; arcs.add(new Arc(px, py, pAng, 125, 0.2f)); hitArea(135, 28);
+        if ((pr & ControlesView.QUADRADO) != 0 && atkT <= 0.06f) {
+            atkT = 0.22f; arcs.add(new Arc(px, py, pAng, 145, 0.22f, false)); hitArea(150, 32);
         }
-        if ((pr & (ControlesView.TRIANGULO | ControlesView.R1)) != 0 && atkT <= 0.08f) {
+        if ((pr & (ControlesView.TRIANGULO | ControlesView.R1)) != 0 && atkT <= 0.06f) {
             boolean full = rage >= 100; if (full) rage = 0;
-            atkT = 0.35f; float rad = full ? 230 : 165;
-            arcs.add(new Arc(px, py, pAng, rad, 0.3f)); shkT = 0.2f; hitArea(rad, full ? 90 : 48);
+            atkT = 0.36f; float rad = full ? 250 : 180;
+            arcs.add(new Arc(px, py, pAng, rad, 0.32f, true)); shkT = 0.22f; hitArea(rad, full ? 105 : 52);
         }
 
         if (dashT > 0) { dashT -= dt; px += pvx * dt; py += pvy * dt; }
-        else { px += ax * 290 * dt; py += ay * 290 * dt; }
-        px = Math.max(65, Math.min(w - 65, px));
-        py = Math.max(115, Math.min(h - 65, py));
+        else { px += ax * 300 * dt; py += ay * 300 * dt; }
+        px = Math.max(85, Math.min(w - 85, px));
+        py = Math.max(135, Math.min(h - 75, py));
 
         Iterator<Enemy> it = enemies.iterator();
         while (it.hasNext()) {
             Enemy e = it.next();
             if (e.cd > 0) e.cd -= dt;
+            if (e.flash > 0) e.flash -= dt;
             float dx = px - e.x, dy = py - e.y, d = (float)Math.hypot(dx, dy);
-            if (d > e.r + 18) { e.x += (dx / d) * e.spd * dt; e.y += (dy / d) * e.spd * dt; }
+            if (d > e.r + 20) { e.x += (dx / d) * e.spd * dt; e.y += (dy / d) * e.spd * dt; }
             else if (e.cd <= 0 && invT <= 0 && jZ < 28) {
-                e.cd = 1.0f; invT = 0.5f; hp -= e.boss ? 18 : 10; shkT = 0.2f;
+                e.cd = 1.0f; invT = 0.5f; hp -= e.boss ? 18 : 9; shkT = 0.2f;
                 if (hp <= 0) { hp = 0; gameOver = true; }
             }
             if (e.hp <= 0) {
                 score += e.boss ? 500 : 100;
-                rage = Math.min(100, rage + 15);
-                hp = Math.min(100, hp + 5);
+                rage = Math.min(100, rage + 16);
+                hp = Math.min(100, hp + 6);
+                for (int i = 0; i < 16; i++) {
+                    float a = rng.nextFloat() * 6.283f;
+                    sparks.add(new Spark(e.x, e.y, (float)Math.cos(a)*220, (float)Math.sin(a)*220, 0.4f, Color.rgb(255, 60, 20)));
+                }
                 it.remove();
             }
         }
@@ -157,11 +168,11 @@ public class SpartanArenaEngine implements Runnable {
         for (Enemy e : enemies) {
             float dx = e.x - px, dy = e.y - py, d = (float)Math.hypot(dx, dy);
             if (d <= rad + e.r) {
-                e.hp -= dmg; hit = true;
-                if (d > 1) { e.x += (dx / d) * 32; e.y += (dy / d) * 32; }
-                for (int i = 0; i < 8; i++) {
+                e.hp -= dmg; e.flash = 0.14f; hit = true;
+                if (d > 1) { e.x += (dx / d) * 36; e.y += (dy / d) * 36; }
+                for (int i = 0; i < 9; i++) {
                     float a = rng.nextFloat() * 6.283f;
-                    sparks.add(new Spark(e.x, e.y, (float)Math.cos(a)*180, (float)Math.sin(a)*180, 0.3f));
+                    sparks.add(new Spark(e.x, e.y, (float)Math.cos(a)*190, (float)Math.sin(a)*190, 0.3f, Color.rgb(255, 160, 30)));
                 }
             }
         }
@@ -176,53 +187,112 @@ public class SpartanArenaEngine implements Runnable {
             w = c.getWidth(); h = c.getHeight();
             c.save();
             if (shkT > 0) c.translate((rng.nextFloat()-0.5f)*16, (rng.nextFloat()-0.5f)*16);
+
             Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-            p.setShader(new RadialGradient(w*0.5f, h*0.55f, Math.max(w, h)*0.75f,
-                    Color.rgb(48, 22, 18), Color.rgb(12, 10, 14), Shader.TileMode.CLAMP));
+            // Langit badai & laut Aegean gelap
+            int skyTop = lightningT > 0 ? Color.rgb(95, 105, 120) : Color.rgb(18, 22, 26);
+            p.setShader(new LinearGradient(0, 0, 0, h, skyTop, Color.rgb(10, 12, 14), Shader.TileMode.CLAMP));
             c.drawRect(0, 0, w, h, p);
             p.setShader(null);
 
-            p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(4); p.setColor(Color.argb(100, 255, 110, 40));
-            c.drawRoundRect(new RectF(55, 105, w - 55, h - 55), 26, 26, p);
+            // Dek Kapal Kayu Aegean (papan kayu + paku perunggu)
+            RectF deck = new RectF(68, 118, w - 68, h - 58);
+            p.setShader(new RadialGradient(w*0.5f, h*0.56f, Math.max(w, h)*0.65f,
+                    Color.rgb(66, 48, 34), Color.rgb(28, 20, 15), Shader.TileMode.CLAMP));
+            c.drawRoundRect(deck, 24, 24, p);
+            p.setShader(null);
+
+            p.setColor(Color.argb(65, 15, 10, 8));
+            p.setStrokeWidth(3);
+            for (float y = 150; y < h - 70; y += 36) c.drawLine(76, y, w - 76, y, p);
+            p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(6); p.setColor(Color.rgb(135, 98, 46));
+            c.drawRoundRect(deck, 24, 24, p);
+
+            // Tebasan rantai api Blades of Chaos
             for (Arc a : arcs) {
-                p.setStrokeWidth(16); p.setColor(Color.rgb(255, 130, 30));
-                c.drawArc(new RectF(a.x - a.rad, a.y - a.rad, a.x + a.rad, a.y + a.rad),
-                        (float)Math.toDegrees(a.ang) - 65, 130, false, p);
-            }
+                float t = a.life / a.maxLife;
 
-            p.setStyle(Paint.Style.FILL);
-            for (Enemy e : enemies) {
-                p.setColor(e.boss ? Color.rgb(190, 30, 30) : Color.rgb(75, 145, 95));
-                c.drawCircle(e.x, e.y, e.r, p);
-                p.setColor(Color.RED);
-                c.drawRect(e.x - 25, e.y - e.r - 12, e.x - 25 + 50 * Math.max(0, e.hp / e.maxHp), e.y - e.r - 6, p);
-            }
-
-            float dy = py - jZ;
-            p.setColor(Color.rgb(235, 225, 215)); c.drawCircle(px, dy, 22, p);
-            p.setColor(Color.rgb(255, 120, 20)); p.setStrokeWidth(5);
-            c.drawLine(px, dy, px + (float)Math.cos(pAng+0.5f)*32, dy + (float)Math.sin(pAng+0.5f)*32, p);
-            c.drawLine(px, dy, px + (float)Math.cos(pAng-0.5f)*32, dy + (float)Math.sin(pAng-0.5f)*32, p);
-
-            for (Spark s : sparks) { p.setColor(Color.rgb(255, 150, 30)); c.drawCircle(s.x, s.y, 5, p); }
-            c.restore();
-
-            p.setColor(Color.rgb(50, 200, 80)); c.drawRoundRect(new RectF(36, 26, 36 + 320*(hp/100f), 50), 8, 8, p);
-            p.setColor(rage >= 100 ? Color.rgb(255, 50, 20) : Color.rgb(255, 170, 30));
-            c.drawRoundRect(new RectF(36, 56, 36 + 240*(rage/100f), 72), 6, 6, p);
-            p.setColor(Color.WHITE); p.setTextSize(26); p.setFakeBoldText(true);
-            c.drawText("WAVE " + wave + "  |  SCORE " + score + "  |  COMBO " + combo, 380, 50, p);
-
-            if (gameOver) {
-                p.setColor(Color.argb(185, 0, 0, 0)); c.drawRect(0, 0, w, h, p);
-                p.setTextAlign(Paint.Align.CENTER); p.setColor(Color.RED); p.setTextSize(64);
-                c.drawText("YOU DIED - PRESS X / SQUARE", w * 0.5f, h * 0.5f, p);
-            }
-        } finally {
+p.setStrokeWidth(a.heavy ? 24 * t : 16 * t);
+p.setColor(a.heavy ? Color.rgb(255, 70, 20) : Color.rgb(255, 155, 35));
+float sweep = a.heavy ? 320 : 140;
+float start = a.heavy ? (float)Math.toDegrees(a.ang) : (float)Math.toDegrees(a.ang) - 70;
+c.drawArc(new RectF(a.x - a.rad, a.y - a.rad, a.x + a.rad, a.y + a.rad), start, sweep, false, p);
+}
+// Musuh (Undead Legionnaire & Cyclops Boss berzirah)
+p.setStyle(Paint.Style.FILL);
+for (Enemy e : enemies) {
+p.setColor(Color.argb(120, 0, 0, 0));
+c.drawOval(new RectF(e.x - e.r, e.y + e.r0.5f, e.x + e.r, e.y + e.r1.05f), p);
+p.setColor(e.flash > 0 ? Color.WHITE : (e.boss ? Color.rgb(125, 38, 32) : Color.rgb(68, 82, 74)));
+c.drawCircle(e.x, e.y, e.r, p);
+// Helm & Zirah Perunggu
+p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(e.boss ? 6 : 4);
+p.setColor(e.boss ? Color.rgb(218, 165, 55) : Color.rgb(150, 140, 115));
+c.drawCircle(e.x, e.y, e.r * 0.85f, p);
+p.setStyle(Paint.Style.FILL);
+// Mata menyala
+p.setColor(e.boss ? Color.rgb(255, 60, 20) : Color.rgb(255, 190, 40));
+c.drawCircle(e.x - e.r0.28f, e.y - e.r0.15f, e.boss ? 5 : 3.5f, p);
+c.drawCircle(e.x + e.r0.28f, e.y - e.r0.15f, e.boss ? 5 : 3.5f, p);
+// Bar darah musuh
+p.setColor(Color.argb(180, 10, 10, 10));
+c.drawRect(e.x - 28, e.y - e.r - 15, e.x + 28, e.y - e.r - 8, p);
+p.setColor(Color.rgb(215, 35, 35));
+c.drawRect(e.x - 28, e.y - e.r - 15, e.x - 28 + 56 * Math.max(0, e.hp / e.maxHp), e.y - e.r - 8, p);
+}
+// Karakter Kratos (Abu-abu pucat + Tato Merah + Rantai Blades of Chaos)
+p.setColor(Color.argb(130, 0, 0, 0));
+c.drawOval(new RectF(px - 26, py + 12, px + 26, py + 28), p);
+float dy = py - jZ;
+// Rantai & Bilah Blades of Chaos
+float reach = atkT > 0 ? 68f : 36f;
+for (int side = -1; side <= 1; side += 2) {
+float ba = pAng + side * (atkT > 0 ? 0.35f : 0.65f);
+float bx = px + (float)Math.cos(ba) * reach;
+float by = dy + (float)Math.sin(ba) * reach;
+p.setColor(Color.rgb(255, 125, 25)); p.setStrokeWidth(4);
+c.drawLine(px, dy, bx, by, p);
+p.setColor(Color.rgb(255, 210, 90)); p.setStrokeWidth(7);
+c.drawLine(bx, by, bx + (float)Math.cos(ba)*16, by + (float)Math.sin(ba)*16, p);
+}
+// Tubuh & Tato Merah Kratos
+p.setColor(invT > 0 && ((int)(invT*25)%2 == 0) ? Color.YELLOW : Color.rgb(225, 220, 215));
+c.drawCircle(px, dy, 23, p);
+p.setColor(Color.rgb(195, 22, 22)); p.setStrokeWidth(6);
+c.drawLine(px - 11, dy - 13, px + 11, dy + 13, p);
+p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(3); p.setColor(Color.rgb(165, 120, 48));
+c.drawCircle(px, dy, 23, p);
+p.setStyle(Paint.Style.FILL);
+for (Spark s : sparks) { p.setColor(s.col); c.drawCircle(s.x, s.y, 5, p); }
+c.restore();
+// HUD Bilah Pedang God of War (Pojok Kiri Atas)
+Path hilt = new Path();
+hilt.moveTo(28, 22); hilt.lineTo(68, 22); hilt.lineTo(82, 42); hilt.lineTo(68, 62); hilt.lineTo(28, 62); hilt.close();
+p.setColor(Color.rgb(165, 125, 52)); c.drawPath(hilt, p);
+p.setColor(Color.rgb(255, 175, 40)); c.drawCircle(52, 42, 11, p);
+// Bilah Darah (HP) berbentuk Pedang
+Path bladeBg = new Path();
+bladeBg.moveTo(78, 28); bladeBg.lineTo(355, 28); bladeBg.lineTo(385, 41); bladeBg.lineTo(355, 54); bladeBg.lineTo(78, 54); bladeBg.close();
+p.setColor(Color.argb(210, 22, 24, 28)); c.drawPath(bladeBg, p);
+float hpW = 78 + 275 * (hp / 100f);
+Path bladeHp = new Path();
+bladeHp.moveTo(80, 31); bladeHp.lineTo(hpW, 31); bladeHp.lineTo(hpW + 18, 41); bladeHp.lineTo(hpW, 51); bladeHp.lineTo(80, 51); bladeHp.close();
+p.setColor(Color.rgb(55, 195, 75)); c.drawPath(bladeHp, p);
+// Bilah Sihir / Rage Biru-Emas di bawah pedang
+p.setColor(Color.argb(200, 20, 25, 35)); c.drawRoundRect(new RectF(78, 58, 295, 73), 5, 5, p);
+p.setColor(rage >= 100 ? Color.rgb(255, 70, 20) : Color.rgb(55, 155, 245));
+c.drawRoundRect(new RectF(80, 60, 80 + 213 * (rage / 100f), 71), 4, 4, p);
+p.setColor(Color.rgb(235, 210, 155)); p.setTextSize(24); p.setFakeBoldText(true);
+c.drawText("WAVE " + wave + "   |   RED ORBS: " + score + "   |   " + combo + " HITS", 405, 48, p);
+if (gameOver) {
+p.setColor(Color.argb(190, 0, 0, 0)); c.drawRect(0, 0, w, h, p);
+p.setTextAlign(Paint.Align.CENTER); p.setColor(Color.rgb(215, 35, 35)); p.setTextSize(64);
+c.drawText("YOU ARE DEAD", w * 0.5f, h * 0.46f, p);
+p.setColor(Color.rgb(235, 210, 155)); p.setTextSize(26);
+c.drawText("Press X or Square to Rise Again", w * 0.5f, h * 0.56f, p);
+}
+} finally {
 holder.unlockCanvasAndPost(c);
-
 }
-
 }
-
 }

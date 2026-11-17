@@ -291,7 +291,7 @@ int arc_run(void) {
   }
   for (unsigned s = 0; s < arc_segment_count; s++) {
     const arc_segment *seg = &arc_segments[s];
-    for (uint32_t i = 0; i < seg->filesz; i++) arc_mem[seg->vaddr + i] = seg->data[i];
+    for (uint32_t i = 0; i < seg->filesz; i++) ((uint8_t*)ARC_P(seg->vaddr))[i] = seg->data[i];
   }
   arc_ctx *ctx = &main_ctx;
   ctx->r[13] = 0xE0000000u - 0x1000u;

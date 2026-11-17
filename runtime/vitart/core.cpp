@@ -539,6 +539,7 @@ static void snap_write(const char *tag) {
 }
 
 static void host_log(const char *msg) {
+    { FILE *fl = fopen("/sdcard/gow_boot.txt", "a"); if (fl) { fprintf(fl, "LOG: %s\n", msg); fclose(fl); } }
     if (std::strncmp(msg, "@SNAP-ENTRY", 11) == 0) return snap_write("entry");
     if (std::strncmp(msg, "@SNAP-EXIT", 10) == 0) return snap_write("exit");
     std::string s(msg);
@@ -1004,6 +1005,7 @@ static std::vector<std::string> installed_args(const char *argv0) {
 #ifdef __ANDROID__
 // no Android o processo é da Activity: android/jni.cpp chama isto numa thread própria
 int vitart_main(int argc, char **argv) {
+    { FILE *fl = fopen("/sdcard/gow_boot.txt", "a"); if (fl) { fprintf(fl, "STEP 0: vitart_main started! argc=%d\n", argc); fclose(fl); } }
 #else
 int main(int argc, char **argv) {
 #endif

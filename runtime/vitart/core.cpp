@@ -601,6 +601,7 @@ static void load_module(const std::string &path) {
         std::string what;
         if (region_of(s.vaddr, &st, nullptr, &what) || region_of(s.vaddr + s.memsz - 1, &st, nullptr, &what))
             fatal("%s: segmento 0x%08x sobrepõe %s", path.c_str(), s.vaddr, what.c_str());
+        { FILE *fl = fopen("/sdcard/gow_boot.txt", "a"); if (fl) { fprintf(fl, "  SEG %u: vaddr=0x%08x memsz=0x%x filesz=0x%x target=%p\n", i, s.vaddr, s.memsz, s.filesz, g_mem + s.vaddr); fflush(fl); fclose(fl); } }
         map_region(s.vaddr, s.memsz, (std::string(m.info->name) + ":seg" + std::to_string(i)).c_str());
         std::memcpy(g_mem + s.vaddr, s.data, s.filesz);
     }

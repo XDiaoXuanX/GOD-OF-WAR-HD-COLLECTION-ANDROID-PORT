@@ -232,8 +232,8 @@ c.drawCircle(e.x, e.y, e.r * 0.85f, p);
 p.setStyle(Paint.Style.FILL);
 // Mata menyala
 p.setColor(e.boss ? Color.rgb(255, 60, 20) : Color.rgb(255, 190, 40));
-c.drawCircle(e.x - e.r0.28f, e.y - e.r0.15f, e.boss ? 5 : 3.5f, p);
-c.drawCircle(e.x + e.r0.28f, e.y - e.r0.15f, e.boss ? 5 : 3.5f, p);
+c.drawCircle(e.x - e.r * 0.28f, e.y - e.r * 0.15f, e.boss ? 5 : 3.5f, p);
+c.drawCircle(e.x + e.r * 0.28f, e.y - e.r * 0.15f, e.boss ? 5 : 3.5f, p);
 // Bar darah musuh
 p.setColor(Color.argb(180, 10, 10, 10));
 c.drawRect(e.x - 28, e.y - e.r - 15, e.x + 28, e.y - e.r - 8, p);

@@ -241,7 +241,7 @@ static LONG CALLBACK on_fault(EXCEPTION_POINTERS *ep) {
         }
     }
     uint8_t *host = reinterpret_cast<uint8_t *>(er->ExceptionInformation[1]);
-    if (!g_mem || host < g_mem || host >= g_mem + (1ull << 32))
+    if (!g_mem || host < g_mem || host >= g_mem + 0x90000000u)
         return EXCEPTION_CONTINUE_SEARCH;
     const uint32_t ga = static_cast<uint32_t>(host - g_mem);
     if (!region_of(ga, nullptr, nullptr, nullptr)) {
@@ -276,7 +276,7 @@ static void watch_protect(bool on) {
 static struct sigaction g_old_segv;
 static void on_fault(int, siginfo_t *si, void *) {
     uint8_t *host = static_cast<uint8_t *>(si->si_addr);
-    if (g_mem && host >= g_mem && host < g_mem + (1ull << 32)) {
+    if (g_mem && host >= g_mem && host < g_mem + 0x90000000u) {
         logf("vitart: acesso a endereço do guest não mapeado 0x%08x", static_cast<uint32_t>(host - g_mem));
         dump_thread_regs();
     }
@@ -288,7 +288,7 @@ static void on_fault(int, siginfo_t *si, void *) {
 bool query_guest(uint64_t addr, uint64_t &start, uint64_t &end, bool &committed) {
     static const uint64_t P = (uint64_t)sysconf(_SC_PAGESIZE);
     const uint64_t pg = addr & ~(P - 1);
-    if (!g_mem || pg >= (1ull << 32)) return false;
+    if (!g_mem || pg >= 0x90000000u) return false;
     uint64_t lim;
     bool mapped;
     {
@@ -323,10 +323,19 @@ bool query_guest(uint64_t addr, uint64_t &start, uint64_t &end, bool &committed)
 }
 
 static void mem_init() {
-    void *p = mmap(nullptr, 1ull << 32, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-    if (p == MAP_FAILED)
-        fatal("não foi possível reservar 4 GiB de espaço de endereços para o guest");
-    g_mem = static_cast<uint8_t *>(p);
+    size_t g_reserve_sz = 0x50000000u;
+    void *p = mmap(nullptr, g_reserve_sz, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (p == MAP_FAILED) {
+        g_reserve_sz = 0x40000000u;
+        p = mmap(nullptr, g_reserve_sz, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    }
+    if (p == MAP_FAILED) {
+        FILE *fl = fopen("/sdcard/gow_boot.txt", "a");
+        if (fl) { fprintf(fl, "FATAL: mmap 1GB failed!\n"); fclose(fl); }
+        fatal("não foi possível reservar espaço de endereços 32-bit para o guest");
+    }
+    { FILE *fl = fopen("/sdcard/gow_boot.txt", "a"); if (fl) { fprintf(fl, "SUCCESS: mmap p=%p size=0x%zx\n", p, g_reserve_sz); fclose(fl); } }
+    g_mem = static_cast<uint8_t *>(p) - 0x40000000u;
     struct sigaction sa{};
     sa.sa_sigaction = on_fault;
     sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
@@ -342,7 +351,7 @@ struct Bump {
     uint32_t cur, end;
     std::mutex m;
 };
-static Bump g_pools[3] = { { 0xB0000000u, 0xC0000000u, {} }, { 0x83000000u, 0xA0000000u, {} }, { 0xA0000000u, 0xB0000000u, {} } };
+static Bump g_pools[3] = { { 0xB0000000u, 0xC0000000u, {} }, { 0x83000000u, 0x8F000000u, {} }, { 0xA0000000u, 0xB0000000u, {} } };
 
 static const uint32_t g_pool_start[3] = { 0xB0000000u, 0x83000000u, 0xA0000000u };
 

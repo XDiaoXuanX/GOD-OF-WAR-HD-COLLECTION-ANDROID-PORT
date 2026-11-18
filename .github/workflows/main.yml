@@ -24,8 +24,8 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/luisxl15/GOD-OF-WAR-HD-COLLECTION.git ../vita-recomp-lab
           ls -la ../vita-recomp-lab/
-          mkdir -p game_dump/elf game_dump/plan
-          find ../vita-recomp-lab -name "*.json" -exec cp -f {} game_dump/plan/ \;
+          mkdir -p game_dump/elf
+          find ../vita-recomp-lab -name "*.json" -exec cp -f {} game_dump/ \;
           for f in eboot.bin gow1.self gow2.self libc.suprx libfios2.suprx; do
             base="${f%.*}"
             if [ -f ../vita-recomp-lab/tools/selfdec.py ]; then
@@ -36,7 +36,7 @@ jobs:
               cp "game_bins/$f" "game_dump/elf/${base}.elf"
             fi
           done
-          ls -lh game_dump/elf/ game_dump/plan/
+          ls -lh game_dump/elf/ game_dump/
 
       - name: Build Native Libraries & Game Modules (32-bit)
         run: |

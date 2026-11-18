@@ -17,10 +17,28 @@ jobs:
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
-          distribution: 'temurin'
+          java-version: "17"
+          distribution: "temurin"
 
-      - name: Build Native Libraries (32-bit)
+      - name: Clone Recompiler & Prepare Game ELFs
+        run: |
+          git clone --depth 1 https://github.com ../vita-recomp-lab
+          ls -la ../vita-recomp-lab/
+          mkdir -p game_dump/elf game_dump/plan
+          find ../vita-recomp-lab -name "*.json" -exec cp -f {} game_dump/plan/ \;
+          for f in eboot.bin gow1.self gow2.self libc.suprx libfios2.suprx; do
+            base="${f%.*}"
+            if [ -f ../vita-recomp-lab/tools/selfdec.py ]; then
+              python3 ../vita-recomp-lab/tools/selfdec.py "game_bins/$f" "game_dump/elf/${base}.elf"
+            elif [ -f ../vita-recomp-lab/vitarecomp/selfdec.py ]; then
+              python3 ../vita-recomp-lab/vitarecomp/selfdec.py "game_bins/$f" "game_dump/elf/${base}.elf"
+            else
+              cp "game_bins/$f" "game_dump/elf/${base}.elf"
+            fi
+          done
+          ls -lh game_dump/elf/ game_dump/plan/
+
+      - name: Build Native Libraries & Game Modules (32-bit)
         run: |
           export ANDROID_NDK=$(ls -d /usr/local/lib/android/sdk/ndk/* | sort -V | tail -n 1)
           echo "Using NDK at: $ANDROID_NDK"
@@ -28,11 +46,13 @@ jobs:
           ./scripts/build-android-pfs.sh
           ./scripts/build-android-runtime.sh
           ./scripts/build-android-vkshim.sh
+          VITA_RECOMP_LAB="$(pwd)/../vita-recomp-lab" ./scripts/build-android-modules.sh "$(pwd)/game_dump" "$(pwd)/android/app/src/main/jniLibs/armeabi-v7a"
 
       - name: Copy .so to jniLibs
         run: |
           mkdir -p android/app/src/main/jniLibs/armeabi-v7a
           cp -f build/lib/*.so android/app/src/main/jniLibs/armeabi-v7a/ || true
+          ls -lh android/app/src/main/jniLibs/armeabi-v7a/
 
       - name: Build Debug APK
         working-directory: ./android
@@ -46,4 +66,3 @@ jobs:
         with:
           name: gow-32bit-debug
           path: android/app/build/outputs/apk/debug/*.apk
-          

@@ -72,7 +72,8 @@ void *linkernsbypass_namespace_dlopen(const char *filename, int flags, android_n
     #if defined(__aarch64__)
         #define __NR_memfd_create 279
     #else
-        #error Unsupported target architecture!
+        #define __NR_memfd_create 385
+
     #endif
 #endif
 

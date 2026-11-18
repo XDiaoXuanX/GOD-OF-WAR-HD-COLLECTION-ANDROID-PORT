@@ -17,7 +17,7 @@ extern const uint32_t arc_entry;
 extern const arc_module_info arc_module;
 
 /* ---- guest memory: flat 4 GiB window, unaligned-safe little-endian accesses ---- */
-#define ARC_P(a) (arc_mem + (uint32_t)(a))
+#define ARC_P(a) (arc_mem + (((uint32_t)(a)) - 0x80000000u))
 static inline uint32_t ARC_LW(uint32_t a) { uint32_t v; __builtin_memcpy(&v, ARC_P(a), 4); return v; }
 static inline uint32_t ARC_LHU(uint32_t a) { uint16_t v; __builtin_memcpy(&v, ARC_P(a), 2); return v; }
 static inline uint32_t ARC_LH(uint32_t a) { int16_t v; __builtin_memcpy(&v, ARC_P(a), 2); return (uint32_t)(int32_t)v; }

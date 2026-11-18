@@ -2,11 +2,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/mman.h>
+#include <stdio.h>
 #include <unistd.h>
 #include "arc.h"
 
 void *arc_platform_reserve_4g(void) {
-  void *p = mmap(NULL, 1ull << 32, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+  void *p = mmap(NULL, 0x68000000u, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
   return p == MAP_FAILED ? NULL : p;
 }
 long arc_platform_write(int fd, const void *buf, uint32_t len) {
@@ -24,7 +25,7 @@ void arc_svc(arc_ctx *ctx, uint32_t imm, uint32_t pc) {
     case 248: /* exit_group */
       arc_platform_exit((int)a0);
     case 4:   /* write */
-      ctx->r[0] = (uint32_t)arc_platform_write((int)a0, arc_mem + a1, a2);
+      ctx->r[0] = (uint32_t)arc_platform_write((int)a0, (uint8_t*)ARC_P(a1), a2);
       return;
     default:
       ctx->r[0] = (uint32_t)-38; /* -ENOSYS, as qemu-arm for the platform syscalls */

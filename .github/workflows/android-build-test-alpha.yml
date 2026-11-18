@@ -1,0 +1,66 @@
+name: Build GoW Collection (64bit)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+
+      - name: Clone Recompiler & Prepare Game ELFs
+        run: |
+          git clone --depth 1 https://github.com/luisxl15/GOD-OF-WAR-HD-COLLECTION.git ../vita-recomp-lab
+          ls -la ../vita-recomp-lab/
+          mkdir -p game_dump/elf
+          find ../vita-recomp-lab -name "*.json" -exec cp -f {} game_dump/ \;
+          for f in eboot.bin gow1.self gow2.self libc.suprx libfios2.suprx; do
+            base="${f%.*}"
+            if [ -f ../vita-recomp-lab/tools/selfdec.py ]; then
+              python3 ../vita-recomp-lab/tools/selfdec.py "game_bins/$f" "game_dump/elf/${base}.elf"
+            elif [ -f ../vita-recomp-lab/vitarecomp/selfdec.py ]; then
+              python3 ../vita-recomp-lab/vitarecomp/selfdec.py "game_bins/$f" "game_dump/elf/${base}.elf"
+            else
+              cp "game_bins/$f" "game_dump/elf/${base}.elf"
+            fi
+          done
+          ls -lh game_dump/elf/ game_dump/
+
+      - name: Build Native Libraries & Game Modules (64-bit)
+        run: |
+          export ANDROID_NDK=$(ls -d /usr/local/lib/android/sdk/ndk/* | sort -V | tail -n 1)
+          echo "Using NDK at: $ANDROID_NDK"
+          chmod +x scripts/*.sh
+          ./scripts/build-android-pfs.sh
+          ./scripts/build-android-runtime.sh
+          ./scripts/build-android-vkshim.sh
+          VITA_RECOMP_LAB="$(pwd)/../vita-recomp-lab" ./scripts/build-android-modules.sh "$(pwd)/game_dump" "$(pwd)/android/app/src/main/jniLibs/arm64-v8a"
+
+      - name: Copy .so to jniLibs
+        run: |
+          mkdir -p android/app/src/main/jniLibs/arm64-v8a
+          cp -f build/lib/*.so android/app/src/main/jniLibs/arm64-v8a/ || true
+          ls -lh android/app/src/main/jniLibs/arm64-v8a/
+
+      - name: Build Release APK
+        working-directory: ./android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease
+
+      - name: Upload APK
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gow-collection-release
+          path: android/app/build/outputs/apk/release/*.apk

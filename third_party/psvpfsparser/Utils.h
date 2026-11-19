@@ -29,8 +29,10 @@ int print_bytes(const unsigned char* bytes, int length);
 void getFileListNoPfs(psvpfs::path root_path, std::set<psvpfs::path>& files, std::set<psvpfs::path>& directories);
 
 //this can be linked only to existing file!
-struct sce_junction
+struct alignas(16) sce_junction
 {
+   void* operator new(std::size_t sz) { void* ptr = nullptr; posix_memalign(&ptr, 16, sz); return ptr; }
+   void operator delete(void* ptr) noexcept { free(ptr); }
 private:
    psvpfs::path m_value; //virtual path in files.db
    mutable psvpfs::path m_real; //real path in file system

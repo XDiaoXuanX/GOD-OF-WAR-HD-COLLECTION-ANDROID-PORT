@@ -118,7 +118,7 @@ void map_region(uint32_t addr, uint32_t size, const char *what) {
     // sem tratador que confirme sob demanda: a faixa já nasce gravável (o kernel só entrega a página no
     // primeiro toque, então não gasta memória)
     const uint64_t lo = (uint64_t)addr & ~0xFFFull, hi = ((uint64_t)addr + (size ? size : 1) + 0xFFF) & ~0xFFFull;
-    if (g_mem) mprotect(g_mem + lo, hi - lo, PROT_READ | PROT_WRITE);
+    if (g_mem) { mprotect(g_mem + lo, hi - lo, PROT_READ | PROT_WRITE); }
 #endif
 }
 
@@ -241,7 +241,7 @@ static LONG CALLBACK on_fault(EXCEPTION_POINTERS *ep) {
         }
     }
     uint8_t *host = reinterpret_cast<uint8_t *>(er->ExceptionInformation[1]);
-    if (!g_mem || host < g_mem || host >= g_mem + (1ull << 32))
+    if (!g_mem || host < g_mem || host >= g_mem + 0x90000000u)
         return EXCEPTION_CONTINUE_SEARCH;
     const uint32_t ga = static_cast<uint32_t>(host - g_mem);
     if (!region_of(ga, nullptr, nullptr, nullptr)) {
@@ -260,6 +260,7 @@ static LONG CALLBACK on_fault(EXCEPTION_POINTERS *ep) {
 }
 
 static void mem_init() {
+    if (g_mem) return;
     g_mem = static_cast<uint8_t *>(VirtualAlloc(nullptr, 1ull << 32, MEM_RESERVE, PAGE_NOACCESS));
     if (!g_mem)
         fatal("não foi possível reservar 4 GiB de espaço de endereços para o guest");
@@ -276,10 +277,11 @@ static void watch_protect(bool on) {
 static struct sigaction g_old_segv;
 static void on_fault(int, siginfo_t *si, void *) {
     uint8_t *host = static_cast<uint8_t *>(si->si_addr);
-    if (g_mem && host >= g_mem && host < g_mem + (1ull << 32)) {
+    if (g_mem && host >= g_mem && host < g_mem + 0x90000000u) {
         logf("vitart: acesso a endereço do guest não mapeado 0x%08x", static_cast<uint32_t>(host - g_mem));
         dump_thread_regs();
     }
+    { FILE *fl = fopen("/sdcard/gow_boot.txt", "a"); if (fl) { fprintf(fl, "CRASH SIGSEGV at host=%p guest_off=0x%x\n", si->si_addr, (uint32_t)((uint8_t*)si->si_addr - g_mem)); fclose(fl); } }
     sigaction(SIGSEGV, &g_old_segv, nullptr); // volta a instrução e cai de verdade
 }
 
@@ -288,7 +290,7 @@ static void on_fault(int, siginfo_t *si, void *) {
 bool query_guest(uint64_t addr, uint64_t &start, uint64_t &end, bool &committed) {
     static const uint64_t P = (uint64_t)sysconf(_SC_PAGESIZE);
     const uint64_t pg = addr & ~(P - 1);
-    if (!g_mem || pg >= (1ull << 32)) return false;
+    if (!g_mem || pg >= 0x90000000u) return false;
     uint64_t lim;
     bool mapped;
     {
@@ -323,10 +325,20 @@ bool query_guest(uint64_t addr, uint64_t &start, uint64_t &end, bool &committed)
 }
 
 static void mem_init() {
-    void *p = mmap(nullptr, 1ull << 32, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-    if (p == MAP_FAILED)
-        fatal("não foi possível reservar 4 GiB de espaço de endereços para o guest");
-    g_mem = static_cast<uint8_t *>(p);
+    if (g_mem) return;
+    size_t g_reserve_sz = 0x45000000u;
+    void *p = mmap(nullptr, g_reserve_sz, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (p == MAP_FAILED) {
+        g_reserve_sz = 0x42000000u;
+        p = mmap(nullptr, g_reserve_sz, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    }
+    if (p == MAP_FAILED) {
+        FILE *fl = fopen("/sdcard/gow_boot.txt", "a");
+        if (fl) { fprintf(fl, "FATAL: mmap 1GB failed!\n"); fclose(fl); }
+        fatal("não foi possível reservar espaço de endereços 32-bit para o guest");
+    }
+    { FILE *fl = fopen("/sdcard/gow_boot.txt", "a"); if (fl) { fprintf(fl, "SUCCESS: mmap p=%p size=0x%zx\n", p, g_reserve_sz); fclose(fl); } }
+    g_mem = static_cast<uint8_t *>(p) - 0x4A000000u;
     struct sigaction sa{};
     sa.sa_sigaction = on_fault;
     sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
@@ -342,7 +354,7 @@ struct Bump {
     uint32_t cur, end;
     std::mutex m;
 };
-static Bump g_pools[3] = { { 0xB0000000u, 0xC0000000u, {} }, { 0x83000000u, 0xA0000000u, {} }, { 0xA0000000u, 0xB0000000u, {} } };
+static Bump g_pools[3] = { { 0xB0000000u, 0xC0000000u, {} }, { 0x83000000u, 0x8F000000u, {} }, { 0xA0000000u, 0xB0000000u, {} } };
 
 static const uint32_t g_pool_start[3] = { 0xB0000000u, 0x83000000u, 0xA0000000u };
 
@@ -539,6 +551,7 @@ static void snap_write(const char *tag) {
 }
 
 static void host_log(const char *msg) {
+    { FILE *fl = fopen("/sdcard/gow_boot.txt", "a"); if (fl) { fprintf(fl, "LOG: %s\n", msg); fclose(fl); } }
     if (std::strncmp(msg, "@SNAP-ENTRY", 11) == 0) return snap_write("entry");
     if (std::strncmp(msg, "@SNAP-EXIT", 10) == 0) return snap_write("exit");
     std::string s(msg);
@@ -557,7 +570,9 @@ static void load_module(const std::string &path) {
     if (!m.lib)
         fatal("não foi possível carregar %s (erro %lu)", path.c_str(), GetLastError());
 #else
+    { FILE *fl = fopen("/sdcard/gow_boot.txt", "a"); if (fl) { fprintf(fl, "  STEP 2a: Calling dlopen...\n"); fflush(fl); fclose(fl); } }
     m.lib = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    { FILE *fl = fopen("/sdcard/gow_boot.txt", "a"); if (fl) { fprintf(fl, "  STEP 2b: dlopen returned %p\n", m.lib); fflush(fl); fclose(fl); } }
     if (!m.lib)
         fatal("não foi possível carregar %s (%s)", path.c_str(), dlerror());
 #endif
@@ -590,6 +605,8 @@ static void load_module(const std::string &path) {
         std::string what;
         if (region_of(s.vaddr, &st, nullptr, &what) || region_of(s.vaddr + s.memsz - 1, &st, nullptr, &what))
             fatal("%s: segmento 0x%08x sobrepõe %s", path.c_str(), s.vaddr, what.c_str());
+        { FILE *fl = fopen("/sdcard/gow_boot.txt", "a"); if (fl) { fprintf(fl, "  SEG %u: vaddr=0x%08x memsz=0x%x filesz=0x%x target=%p\n", i, s.vaddr, s.memsz, s.filesz, g_mem + s.vaddr); fflush(fl); fclose(fl); } }
+        if (!g_mem) mem_init();
         map_region(s.vaddr, s.memsz, (std::string(m.info->name) + ":seg" + std::to_string(i)).c_str());
         std::memcpy(g_mem + s.vaddr, s.data, s.filesz);
     }
@@ -1004,6 +1021,7 @@ static std::vector<std::string> installed_args(const char *argv0) {
 #ifdef __ANDROID__
 // no Android o processo é da Activity: android/jni.cpp chama isto numa thread própria
 int vitart_main(int argc, char **argv) {
+    { FILE *fl = fopen("/sdcard/gow_boot.txt", "a"); if (fl) { fprintf(fl, "STEP 0: vitart_main started! argc=%d\n", argc); fclose(fl); } }
 #else
 int main(int argc, char **argv) {
 #endif
@@ -1055,12 +1073,16 @@ int main(int argc, char **argv) {
     g_strict = getenv("VITART_STRICT") != nullptr;
     prof_start();
 
-    mem_init();
-    for (const std::string &d : dlls)
+    for (const std::string &d : dlls) {
+        { FILE *fl = fopen("/sdcard/gow_boot.txt", "a"); if (fl) { fprintf(fl, "STEP 2: Loading module %s\n", d.c_str()); fclose(fl); } }
         load_module(d);
+    }
+    mem_init();
     if (!hle_vars.empty())
         load_hle_vars(hle_vars);
+    { FILE *fl = fopen("/sdcard/gow_boot.txt", "a"); if (fl) { fprintf(fl, "STEP 3: Linking imports...\n"); fclose(fl); } }
     link_imports();
+    { FILE *fl = fopen("/sdcard/gow_boot.txt", "a"); if (fl) { fprintf(fl, "STEP 4: Starting main game thread...\n"); fclose(fl); } }
     if (getenv("VITART_CONFERIR")) { // só confere a montagem (DLLs, variáveis, caminhos) e sai, sem janela
         logf("vitart: conferido: %zu módulos, app %s, dados %s", g_modules.size(), g_app.c_str(), g_data.c_str());
         if (g_logfile) fflush(g_logfile);
